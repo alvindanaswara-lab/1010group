@@ -1,0 +1,8 @@
+{
+  "name": "1010Group - F&B Central Kitchen & Warehouse Supply",
+  "description": "Sistem terpadu manajemen rantai pasok dan inventaris F&B untuk pemesanan bahan baku outlet ke gudang pusat, purchasing, dan vendor.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
