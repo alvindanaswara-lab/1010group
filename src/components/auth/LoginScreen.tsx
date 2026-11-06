@@ -183,25 +183,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
         <div className="w-full flex items-center justify-center">
           {/* Authentication Card */}
           <div className="w-full max-w-lg mx-auto">
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl overflow-hidden backdrop-blur-xl">
-              {/* Tab Navigation */}
-              <div className="flex border-b border-slate-800 bg-slate-950/60 p-1.5 gap-1.5">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setActiveMode('form');
-                    setErrorMessage('');
-                  }}
-                  className={`flex-1 py-2.5 px-3 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 cursor-pointer ${
-                    activeMode === 'form'
-                      ? 'bg-amber-600 text-white shadow-md shadow-amber-600/20'
-                      : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
-                  }`}
-                >
-                  <Lock className="w-3.5 h-3.5" />
-                  <span>Form Login Akun</span>
-                </button>
-              </div>
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl overflow-hidden backdrop-blur-xl">
 
               {/* Error Notice */}
               {errorMessage && (

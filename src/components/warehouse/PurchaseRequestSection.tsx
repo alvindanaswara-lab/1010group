@@ -126,8 +126,13 @@ export const PurchaseRequestSection: React.FC = () => {
   const [showAddPOItemModal, setShowAddPOItemModal] = useState(false);
   const [targetPOForAddItem, setTargetPOForAddItem] = useState<PurchaseOrder | null>(null);
   const [newItemSku, setNewItemSku] = useState(inventory[0]?.sku || '');
+  const [addItemSearchQuery, setAddItemSearchQuery] = useState('');
+  const [isAddItemDropdownOpen, setIsAddItemDropdownOpen] = useState(false);
+  const [newItemCategory, setNewItemCategory] = useState<ItemCategory>(
+    inventory[0]?.category || 'Dry Item'
+  );
+  const [newItemUnit, setNewItemUnit] = useState(inventory[0]?.unit || 'Kg');
   const [newItemQty, setNewItemQty] = useState(10);
-  const [newItemPlace, setNewItemPlace] = useState('Central Kitchen - Pool Order');
 
   const [editingPOItem, setEditingPOItem] = useState<POItem | null>(null);
   const [editItemQty, setEditItemQty] = useState(1);
@@ -414,14 +419,48 @@ export const PurchaseRequestSection: React.FC = () => {
     scrollToTop();
   };
 
+  // Selected item & filtered search items for Add PO Item modal
+  const selectedAddInventoryItem =
+    masterInventoryList.find((i) => i.sku === newItemSku) ||
+    inventory.find((i) => i.sku === newItemSku) ||
+    null;
+
+  const filteredAddSearchItems = (masterInventoryList.length > 0 ? masterInventoryList : inventory).filter(
+    (item) => {
+      if (!addItemSearchQuery.trim()) return true;
+      const q = addItemSearchQuery.toLowerCase();
+      return (
+        item.sku.toLowerCase().includes(q) ||
+        item.itemName.toLowerCase().includes(q) ||
+        item.category.toLowerCase().includes(q)
+      );
+    }
+  );
+
+  const handleSelectAddPOItem = (item: InventoryItem) => {
+    setNewItemSku(item.sku);
+    setNewItemCategory(item.category);
+    setNewItemUnit(item.unit);
+    setAddItemSearchQuery('');
+    setIsAddItemDropdownOpen(false);
+  };
+
   // PO Item Operations: Add, Edit, Delete
   const handleOpenAddPOItemModal = (po: PurchaseOrder) => {
     setTargetPOForAddItem(po);
-    if (!newItemSku && inventory.length > 0) {
-      setNewItemSku(inventory[0].sku);
+    const defaultItem =
+      masterInventoryList.find((i) => i.sku === newItemSku) ||
+      inventory.find((i) => i.sku === newItemSku) ||
+      masterInventoryList[0] ||
+      inventory[0];
+    if (defaultItem) {
+      setNewItemSku(defaultItem.sku);
+      setNewItemCategory(defaultItem.category);
+      setNewItemUnit(defaultItem.unit);
     }
+    setAddItemSearchQuery('');
+    setIsAddItemDropdownOpen(false);
     setNewItemQty(1);
-    setNewItemPlace('Central Kitchen - Pool Order');
     setShowAddPOItemModal(true);
   };
 
@@ -432,18 +471,22 @@ export const PurchaseRequestSection: React.FC = () => {
       activeEditingPO ||
       (selectedPOId ? purchaseOrders.find((p) => p.id === selectedPOId) || null : null);
     if (!targetPO) return;
-    const inv = inventory.find((i) => i.sku === newItemSku) || inventory[0];
+    const inv =
+      masterInventoryList.find((i) => i.sku === newItemSku) ||
+      inventory.find((i) => i.sku === newItemSku) ||
+      masterInventoryList[0] ||
+      inventory[0];
     if (!inv) return;
 
     const newItem: POItem = {
       sku: inv.sku,
       itemName: inv.itemName,
-      category: inv.category,
+      category: newItemCategory || inv.category,
       qty: newItemQty,
-      unit: inv.unit,
+      unit: newItemUnit.trim() || inv.unit,
       price: inv.price,
       total: newItemQty * inv.price,
-      place: newItemPlace || 'Central Kitchen - Pool Order',
+      place: '-',
       status: 'Pending',
     };
 
@@ -468,15 +511,15 @@ export const PurchaseRequestSection: React.FC = () => {
         { label: 'Nomor PO', value: targetPO.id },
         { label: 'Item Ditambahkan', value: `${newItem.itemName} (${newItem.sku})` },
         { label: 'Kategori', value: newItem.category },
-        { label: 'Qty & Satuan', value: `${newItem.qty} ${newItem.unit}` },
-        { label: 'Alokasi Tujuan', value: newItem.place },
+        { label: 'Qty & Unit', value: `${newItem.qty} ${newItem.unit}` },
       ],
     });
     setShowSuccessModal(true);
 
     // Reset input
     setNewItemQty(1);
-    setNewItemPlace('Central Kitchen - Pool Order');
+    setAddItemSearchQuery('');
+    setIsAddItemDropdownOpen(false);
     scrollToTop();
   };
 
@@ -1988,47 +2031,163 @@ export const PurchaseRequestSection: React.FC = () => {
             </div>
 
             <div className="space-y-3 text-xs">
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">
-                  Pilih Barang
+              {/* Field Pencarian Barang */}
+              <div className="relative">
+                <label className="block font-semibold text-slate-700 mb-1 flex items-center justify-between">
+                  <span className="flex items-center gap-1.5">
+                    <Search className="w-3.5 h-3.5 text-amber-600" />
+                    Pencarian Barang
+                  </span>
+                  {selectedAddInventoryItem && (
+                    <span className="text-[10px] text-amber-700 font-bold bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">
+                      Terpilih: {selectedAddInventoryItem.sku}
+                    </span>
+                  )}
                 </label>
-                <select
-                  value={newItemSku}
-                  onChange={(e) => setNewItemSku(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-amber-500 outline-hidden"
-                >
-                  {inventory.map((inv) => (
-                    <option key={inv.sku} value={inv.sku}>
-                      [{inv.sku}] {inv.itemName} ({inv.category} • {inv.unit})
-                    </option>
-                  ))}
-                </select>
+
+                <div className="relative">
+                  <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    value={addItemSearchQuery}
+                    onFocus={() => setIsAddItemDropdownOpen(true)}
+                    onChange={(e) => {
+                      setAddItemSearchQuery(e.target.value);
+                      setIsAddItemDropdownOpen(true);
+                    }}
+                    placeholder={
+                      selectedAddInventoryItem
+                        ? `Cari barang lain (saat ini: [${selectedAddInventoryItem.sku}] ${selectedAddInventoryItem.itemName})...`
+                        : 'Ketik SKU, Nama Barang, atau Kategori...'
+                    }
+                    className="w-full pl-9 pr-8 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-amber-500 outline-hidden"
+                  />
+                  {addItemSearchQuery && (
+                    <button
+                      type="button"
+                      onClick={() => setAddItemSearchQuery('')}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+
+                {/* Dropdown Hasil Pencarian Barang */}
+                {isAddItemDropdownOpen && (
+                  <div className="absolute left-0 right-0 top-full mt-1 bg-white border border-slate-300 rounded-xl shadow-xl z-30 max-h-48 overflow-y-auto divide-y divide-slate-100">
+                    {filteredAddSearchItems.length === 0 ? (
+                      <div className="p-3 text-center text-slate-400 text-xs">
+                        Tidak ada barang yang cocok dengan "{addItemSearchQuery}".
+                      </div>
+                    ) : (
+                      filteredAddSearchItems.map((inv) => (
+                        <div
+                          key={inv.sku}
+                          onClick={() => handleSelectAddPOItem(inv)}
+                          className={`p-2.5 hover:bg-amber-50 cursor-pointer transition flex items-center justify-between text-xs ${
+                            inv.sku === newItemSku
+                              ? 'bg-amber-50/80 font-bold text-amber-900'
+                              : 'text-slate-700'
+                          }`}
+                        >
+                          <div>
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-mono text-[11px] font-bold text-amber-700 bg-amber-100/70 px-1.5 py-0.5 rounded">
+                                {inv.sku}
+                              </span>
+                              <span className="font-semibold text-slate-900">{inv.itemName}</span>
+                            </div>
+                            <div className="text-[10px] text-slate-500 mt-0.5 flex items-center gap-2">
+                              <span>Kategori: {inv.category}</span>
+                              <span>•</span>
+                              <span>Unit: {inv.unit}</span>
+                            </div>
+                          </div>
+                          {inv.sku === newItemSku && (
+                            <Check className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                          )}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+
+                {/* Info Barang Terpilih */}
+                {selectedAddInventoryItem && (
+                  <div className="mt-2 p-2.5 bg-amber-50/60 border border-amber-200 rounded-xl flex items-center justify-between gap-2">
+                    <div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-mono font-bold text-[11px] bg-amber-600 text-white px-1.5 py-0.5 rounded">
+                          {selectedAddInventoryItem.sku}
+                        </span>
+                        <span className="font-bold text-slate-900">
+                          {selectedAddInventoryItem.itemName}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-slate-600 mt-0.5">
+                        Kategori: <strong>{newItemCategory}</strong> • Unit: <strong>{newItemUnit}</strong>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setIsAddItemDropdownOpen((prev) => !prev)}
+                      className="px-2 py-1 text-[11px] font-bold bg-white text-amber-800 border border-amber-300 rounded-lg hover:bg-amber-100 transition cursor-pointer shrink-0"
+                    >
+                      {isAddItemDropdownOpen ? 'Tutup' : 'Ganti'}
+                    </button>
+                  </div>
+                )}
               </div>
 
+              {/* Kategori & Unit */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Kategori</label>
+                  <select
+                    value={newItemCategory}
+                    onChange={(e) => setNewItemCategory(e.target.value as ItemCategory)}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-slate-50 font-medium text-slate-800 focus:ring-2 focus:ring-amber-500 outline-hidden"
+                  >
+                    {ITEM_CATEGORIES.map((cat) => (
+                      <option key={cat} value={cat}>
+                        {cat}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Unit</label>
+                  <input
+                    type="text"
+                    required
+                    value={newItemUnit}
+                    onChange={(e) => setNewItemUnit(e.target.value)}
+                    placeholder="Contoh: Kg, Pack, Pcs, Liter"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-slate-50 font-semibold text-slate-800 focus:ring-2 focus:ring-amber-500 outline-hidden"
+                  />
+                </div>
+              </div>
+
+              {/* Jumlah (Qty) */}
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Jumlah (Qty)</label>
-                <input
-                  type="number"
-                  min="1"
-                  required
-                  value={newItemQty}
-                  onChange={(e) => setNewItemQty(Math.max(1, parseInt(e.target.value) || 1))}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg font-bold text-sm focus:ring-2 focus:ring-amber-500 outline-hidden"
-                />
-              </div>
-
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">
-                  Place (Tujuan Outlet & Departemen)
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={newItemPlace}
-                  onChange={(e) => setNewItemPlace(e.target.value)}
-                  placeholder="e.g. Resto Senopati - Kitchen"
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-amber-500 outline-hidden"
-                />
+                <div className="relative">
+                  <input
+                    type="number"
+                    min="1"
+                    required
+                    value={newItemQty}
+                    onChange={(e) => setNewItemQty(Math.max(1, parseInt(e.target.value) || 1))}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg font-bold text-sm focus:ring-2 focus:ring-amber-500 outline-hidden"
+                  />
+                  {newItemUnit && (
+                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-500 pointer-events-none">
+                      {newItemUnit}
+                    </span>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -2038,6 +2197,7 @@ export const PurchaseRequestSection: React.FC = () => {
                 onClick={() => {
                   setShowAddPOItemModal(false);
                   setTargetPOForAddItem(null);
+                  setIsAddItemDropdownOpen(false);
                 }}
                 className="px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer"
               >
