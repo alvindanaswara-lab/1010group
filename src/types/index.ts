@@ -266,6 +266,7 @@ export interface Vendor {
   cashType?: VendorCashType | string; // Pilihan opsi Cash
   paymentType: string; // e.g. 'TOP 30 Hari' | 'Cash / COD'
   pic: string;
+  minimumOrder?: number; // Nilai Minimum Order (Rp)
   totalPurchase: number;
   categories: ItemCategory[];
 }
@@ -301,6 +302,10 @@ export interface ManualInboundRecord {
   qty: number;
   unit: string;
   price?: number;
+  priceBeforePPN?: number;
+  includePPN?: boolean;
+  ppnPercentage?: number;
+  ppnAmount?: number;
   totalPrice?: number;
   vendorName?: string;
   source: string; // e.g., "Vendor: PT Berkah Pangan", "Pembelian Langsung Pasar", "Retur Outlet", "Koreksi Stok"

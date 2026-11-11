@@ -163,9 +163,9 @@ export function getNextQueuedSKU(
  * 7. BEGINNING INVENTORY USAGE
  * 8. BEGINNING INVENTORY VALUE (qty * PRICE BUDGET)
  * 9. INBOUND USAGE
- * 10. INBOUND VALUE (total inbound value = inbound * PRICE ACTUAL)
+ * 10. INBOUND VALUE (akumulasi nilai inbound / inbound * PRICE ACTUAL)
  * 11. OUTBOND USAGE
- * 12. OUTBOND VALUE (total outbond value = outbond * PRICE BUDGET)
+ * 12. OUTBOND VALUE (total outbond value = outbond * PRICE ACTUAL)
  * 13. ENDING INVENTORY USAGE (beginning + inbound - outbond)
  * 14. ENDING INVENTORY VALUE (beginning value + inbound value - outbond value)
  * 15. SO USAGE (Stock Opname count)
@@ -178,17 +178,21 @@ export function normalizeInventoryItem(
   period: string = '2026-10'
 ): InventoryItem {
   const priceBudget = item.priceBudget ?? item.price ?? 25000;
-  // If priceActual is not defined, give a realistic market actual (between 98% and 105% of budget)
-  const priceActual = item.priceActual ?? item.price ?? priceBudget;
+  const inbound = item.inbound ?? 0;
+
+  let priceActual = item.priceActual ?? item.price ?? priceBudget;
+  let inboundValue = Math.round(inbound * priceActual);
+
+  if (item.inboundValue !== undefined && inbound > 0 && item.inboundValue > 0) {
+    inboundValue = Math.round(item.inboundValue);
+    priceActual = Math.round(inboundValue / inbound);
+  }
 
   const beginningInventory = item.beginningInventory ?? 0;
   const beginningValue = Math.round(beginningInventory * priceBudget);
 
-  const inbound = item.inbound ?? 0;
-  const inboundValue = Math.round(inbound * priceActual);
-
   const outbond = item.outbond ?? 0;
-  const outbondValue = Math.round(outbond * priceBudget);
+  const outbondValue = Math.round(outbond * priceActual);
 
   const endingInventory = beginningInventory + inbound - outbond;
   const endingValue = beginningValue + inboundValue - outbondValue;

@@ -169,7 +169,7 @@ export const RoleDashboard: React.FC<RoleDashboardProps> = ({
       0
     );
     const outVal = inventory.reduce(
-      (s, i) => s + (i.outbondValue ?? i.outbond * (i.priceBudget || i.price || 0)),
+      (s, i) => s + (i.outbondValue ?? i.outbond * (i.priceActual || i.price || 0)),
       0
     );
     const endVal = inventory.reduce(

@@ -43,6 +43,7 @@ export const SystemSettingSection: React.FC = () => {
     setCurrentUser,
     resetAllData,
     clearAllForms,
+    clearMasterInventory,
     resetInventoryBalances,
     inventory,
     addAuditLog,
@@ -1289,20 +1290,66 @@ export const SystemSettingSection: React.FC = () => {
                   Hapus Semua Data Form Transaksi
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Mengosongkan seluruh formulir dan riwayat transaksi pada <strong>Inbound</strong>, <strong>Outbond</strong>, <strong>Purchase Request</strong>, <strong>Purchasing & Vendor</strong>, dan <strong>Cost Control</strong> tanpa menghapus Master Inventory & Data Outlet.
+                  Mengosongkan seluruh formulir dan riwayat transaksi pada <strong>Inbound</strong>, <strong>Outbond</strong>, <strong>Purchase Request</strong>, <strong>Purchasing &amp; Vendor</strong>, dan <strong>Cost Control</strong> tanpa menghapus Master Inventory &amp; Data Outlet.
                 </p>
               </div>
 
               <button
+                type="button"
                 onClick={() => {
-                  if (confirm('Apakah Anda yakin ingin menghapus semua data form pada Inbound, Outbond, Purchase Request, Purchasing & Vendor, dan Cost Control?')) {
-                    clearAllForms();
-                  }
+                  clearAllForms();
+                  setSuccessModalData({
+                    title: 'Seluruh Data Form Transaksi Dikosongkan!',
+                    message:
+                      'Seluruh formulir dan riwayat transaksi pada Inbound, Outbond, Purchase Request, Purchasing & Vendor, dan Cost Control telah dikosongkan.',
+                    details: [
+                      { label: 'Inbound & Outbond', value: 'Kosong (0 Form)' },
+                      { label: 'Purchase Request & PO', value: 'Kosong (0 Form)' },
+                      { label: 'Cost Control', value: 'Kosong (0 Form)' },
+                      { label: 'Data Outlet & User', value: 'Tetap Tersimpan' },
+                    ],
+                  });
+                  setShowSuccessModal(true);
+                  scrollToTop();
                 }}
                 className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold transition shadow-xs flex items-center gap-1.5 self-start sm:self-auto shrink-0 cursor-pointer"
               >
                 <Trash2 className="w-3.5 h-3.5" />
                 Hapus Data Form
+              </button>
+            </div>
+
+            <div className="bg-white rounded-xl border border-rose-200 p-5 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div>
+                <h3 className="font-bold text-sm text-rose-900 flex items-center gap-2">
+                  <Trash2 className="w-4 h-4 text-rose-600" />
+                  Kosongkan Seluruh Data Master Inventory
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Menghapus dan mengosongkan seluruh daftar item barang pada <strong>Master Inventory</strong> di semua periode tanpa menghapus Data Outlet &amp; User.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  clearMasterInventory({ allPeriods: true });
+                  setSuccessModalData({
+                    title: 'Master Inventory Berhasil Dikosongkan!',
+                    message:
+                      'Seluruh data barang pada Master Inventory di semua periode telah dikosongkan.',
+                    details: [
+                      { label: 'Total SKU Master Inventory', value: '0 SKU (Kosong)' },
+                      { label: 'Data Outlet & User', value: 'Tetap Tersimpan' },
+                    ],
+                  });
+                  setShowSuccessModal(true);
+                  scrollToTop();
+                }}
+                className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition shadow-xs flex items-center gap-1.5 self-start sm:self-auto shrink-0 cursor-pointer"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                Kosongkan Master Inventory
               </button>
             </div>
 
@@ -1313,15 +1360,24 @@ export const SystemSettingSection: React.FC = () => {
                   Reset Stok Master Inventory
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Mengatur ulang seluruh item di Master Inventory menjadi <strong>Beginning Stock: 5</strong>, <strong>Inbound: 0</strong>, dan <strong>Outbond: 0</strong> (Saldo Akhir: 5, Opname: 0).
+                  Mengatur ulang seluruh item di Master Inventory menjadi <strong>Inbound: 0</strong> dan <strong>Outbond: 0</strong>.
                 </p>
               </div>
 
               <button
+                type="button"
                 onClick={() => {
-                  if (confirm('Apakah Anda yakin ingin mereset seluruh saldo item di Master Inventory (Beginning: 5, Inbound: 0, Outbond: 0)?')) {
-                    resetInventoryBalances();
-                  }
+                  resetInventoryBalances();
+                  setSuccessModalData({
+                    title: 'Saldo Stok Master Inventory Direset!',
+                    message:
+                      'Seluruh mutasi Inbound dan Outbond pada Master Inventory telah direset menjadi 0.',
+                    details: [
+                      { label: 'Inbound & Outbond', value: '0' },
+                    ],
+                  });
+                  setShowSuccessModal(true);
+                  scrollToTop();
                 }}
                 className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition shadow-xs flex items-center gap-1.5 self-start sm:self-auto shrink-0 cursor-pointer"
               >
@@ -1337,15 +1393,14 @@ export const SystemSettingSection: React.FC = () => {
                   Reset Database ke Standar Awal
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Mengembalikan pengaturan database dan master data ke kondisi awal.
+                  Mengembalikan pengaturan database dan master data ke kondisi awal (kosong).
                 </p>
               </div>
 
               <button
+                type="button"
                 onClick={() => {
-                  if (confirm('Apakah Anda yakin ingin mereset seluruh database aplikasi ke kondisi awal?')) {
-                    resetAllData();
-                  }
+                  resetAllData();
                 }}
                 className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-bold transition shadow-xs flex items-center gap-1.5 self-start sm:self-auto shrink-0 cursor-pointer"
               >

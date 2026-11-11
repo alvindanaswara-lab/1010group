@@ -45,6 +45,7 @@ import {
   Store,
   Building2,
   SlidersHorizontal,
+  Ban,
 } from 'lucide-react';
 
 export const PurchaseRequestSection: React.FC = () => {
@@ -133,6 +134,7 @@ export const PurchaseRequestSection: React.FC = () => {
   );
   const [newItemUnit, setNewItemUnit] = useState(inventory[0]?.unit || 'Kg');
   const [newItemQty, setNewItemQty] = useState(10);
+  const [newItemReason, setNewItemReason] = useState('');
 
   const [editingPOItem, setEditingPOItem] = useState<POItem | null>(null);
   const [editItemQty, setEditItemQty] = useState(1);
@@ -461,6 +463,7 @@ export const PurchaseRequestSection: React.FC = () => {
     setAddItemSearchQuery('');
     setIsAddItemDropdownOpen(false);
     setNewItemQty(1);
+    setNewItemReason('');
     setShowAddPOItemModal(true);
   };
 
@@ -478,15 +481,20 @@ export const PurchaseRequestSection: React.FC = () => {
       inventory[0];
     if (!inv) return;
 
+    const reasonText = newItemReason.trim();
+    const budgetPrice =
+      inv.priceBudget !== undefined && inv.priceBudget > 0
+        ? inv.priceBudget
+        : inv.price ?? 0;
     const newItem: POItem = {
       sku: inv.sku,
       itemName: inv.itemName,
       category: newItemCategory || inv.category,
       qty: newItemQty,
       unit: newItemUnit.trim() || inv.unit,
-      price: inv.price,
-      total: newItemQty * inv.price,
-      place: '-',
+      price: budgetPrice,
+      total: newItemQty * budgetPrice,
+      place: reasonText ? `Alasan: ${reasonText}` : '-',
       status: 'Pending',
     };
 
@@ -512,12 +520,14 @@ export const PurchaseRequestSection: React.FC = () => {
         { label: 'Item Ditambahkan', value: `${newItem.itemName} (${newItem.sku})` },
         { label: 'Kategori', value: newItem.category },
         { label: 'Qty & Unit', value: `${newItem.qty} ${newItem.unit}` },
+        { label: 'Alasan Penambahan', value: reasonText || '-' },
       ],
     });
     setShowSuccessModal(true);
 
     // Reset input
     setNewItemQty(1);
+    setNewItemReason('');
     setAddItemSearchQuery('');
     setIsAddItemDropdownOpen(false);
     scrollToTop();
@@ -582,6 +592,156 @@ export const PurchaseRequestSection: React.FC = () => {
     if (activeEditingPO && activeEditingPO.id === targetId) {
       setActiveEditingPO(updatedPO);
     }
+  };
+
+  // Helper: Pecah 1 item PO yang ter-merge menjadi baris-baris item per outlet
+  const splitMergedPOItem = (it: POItem): POItem[] => {
+    if (it.outletBreakdowns && it.outletBreakdowns.length > 1) {
+      return it.outletBreakdowns.map((bd) => {
+        const unitStr = bd.unit || it.unit;
+        return {
+          ...it,
+          qty: bd.qty,
+          unit: unitStr,
+          total: bd.qty * it.price,
+          place: `${bd.outletName} (${bd.qty} ${unitStr})`,
+          isMerged: false,
+          outletBreakdowns: [bd],
+          outletBreakdownText: `${bd.outletName}: ${bd.qty} ${unitStr}`,
+        };
+      });
+    }
+
+    // Fallback: parse dari outletBreakdownText atau place jika format "Outlet A: 10 Kg, Outlet B: 5 Kg"
+    const rawText =
+      it.outletBreakdownText ||
+      (it.place.includes(':') ? it.place.replace(/^Digabung\s*\([^)]*\)\s*:\s*/i, '') : '');
+    if (rawText && rawText.includes(',')) {
+      const parts = rawText
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (parts.length > 1) {
+        return parts.map((part) => {
+          const [outletPart, qtyPart] = part.split(':').map((s) => s.trim());
+          const parsedQty = qtyPart ? parseInt(qtyPart, 10) || it.qty : it.qty;
+          const oName = outletPart || 'Outlet';
+          return {
+            ...it,
+            qty: parsedQty,
+            total: parsedQty * it.price,
+            place: `${oName} (${parsedQty} ${it.unit})`,
+            isMerged: false,
+            outletBreakdowns: [
+              {
+                outletName: oName,
+                department: 'Kitchen',
+                qty: parsedQty,
+                unit: it.unit,
+              },
+            ],
+            outletBreakdownText: `${oName}: ${parsedQty} ${it.unit}`,
+          };
+        });
+      }
+    }
+
+    return [{ ...it, isMerged: false }];
+  };
+
+  // Lepas Merge untuk 1 item tertentu pada PO
+  const handleUnmergePOItem = (poId: string, sku: string, place: string) => {
+    const targetPO = purchaseOrders.find((p) => p.id === poId);
+    if (!targetPO) return;
+
+    let targetItem: POItem | null = null;
+    let splitRowsCount = 0;
+
+    const newItems: POItem[] = [];
+    targetPO.items.forEach((it) => {
+      if (it.sku === sku && it.place === place) {
+        targetItem = it;
+        const splitItems = splitMergedPOItem(it);
+        splitRowsCount = splitItems.length;
+        newItems.push(...splitItems);
+      } else {
+        newItems.push(it);
+      }
+    });
+
+    if (!targetItem) return;
+
+    const newTotal = newItems.reduce((acc, it) => acc + it.total, 0);
+    const updatedPO: PurchaseOrder = {
+      ...targetPO,
+      items: newItems,
+      totalAmount: newTotal,
+    };
+
+    updatePO(updatedPO);
+    if (activeEditingPO && activeEditingPO.id === poId) {
+      setActiveEditingPO(updatedPO);
+    }
+
+    const unmergedItem = targetItem as POItem;
+    setSuccessModalData({
+      title: 'Merge Multi-Outlet Berhasil Dilepas!',
+      message: `Item [${unmergedItem.sku}] ${unmergedItem.itemName} pada PO ${targetPO.id} telah dipisahkan menjadi ${splitRowsCount} baris alokasi outlet masing-masing.`,
+      details: [
+        { label: 'Nomor PO', value: targetPO.id },
+        { label: 'Barang', value: `[${unmergedItem.sku}] ${unmergedItem.itemName}` },
+        { label: 'Hasil Pemisahan', value: `${splitRowsCount} baris per-outlet` },
+      ],
+    });
+    setShowSuccessModal(true);
+  };
+
+  // Lepas Semua Merge Multi-Outlet dalam 1 dokumen PO
+  const handleUnmergeAllPOItems = (poId: string) => {
+    const targetPO = purchaseOrders.find((p) => p.id === poId);
+    if (!targetPO) return;
+
+    let unmergedCount = 0;
+    let resultingRows = 0;
+
+    const newItems: POItem[] = [];
+    targetPO.items.forEach((it) => {
+      const isItemMerged =
+        it.isMerged || (it.outletBreakdowns && it.outletBreakdowns.length > 1);
+      if (isItemMerged) {
+        unmergedCount += 1;
+        const splitItems = splitMergedPOItem(it);
+        resultingRows += splitItems.length;
+        newItems.push(...splitItems);
+      } else {
+        newItems.push(it);
+      }
+    });
+
+    if (unmergedCount === 0) return;
+
+    const newTotal = newItems.reduce((acc, it) => acc + it.total, 0);
+    const updatedPO: PurchaseOrder = {
+      ...targetPO,
+      items: newItems,
+      totalAmount: newTotal,
+    };
+
+    updatePO(updatedPO);
+    if (activeEditingPO && activeEditingPO.id === poId) {
+      setActiveEditingPO(updatedPO);
+    }
+
+    setSuccessModalData({
+      title: 'Seluruh Merge Multi-Outlet Berhasil Dilepas!',
+      message: `Sebanyak ${unmergedCount} item gabungan pada PO ${targetPO.id} telah dipisahkan menjadi ${resultingRows} baris alokasi per masing-masing outlet.`,
+      details: [
+        { label: 'Nomor PO', value: targetPO.id },
+        { label: 'Item Merge Dilepas', value: `${unmergedCount} SKU gabungan` },
+        { label: 'Total Baris Setelah Dilepas', value: `${newItems.length} baris item` },
+      ],
+    });
+    setShowSuccessModal(true);
   };
 
   // Handle Perubahan Bebas Qty PO (Field Bebas)
@@ -1513,6 +1673,11 @@ export const PurchaseRequestSection: React.FC = () => {
                           return matchSearch && matchCategory && matchPlace;
                         });
 
+                        // Rejected items inside this PO
+                        const rejectedPOItems = po.items.filter(
+                          (it) => it.status === 'Rejected' || it.approvalStatus === 'Rejected'
+                        );
+
                         return (
                           <React.Fragment key={po.id}>
                             <tr
@@ -1522,35 +1687,57 @@ export const PurchaseRequestSection: React.FC = () => {
                               }`}
                             >
                               <td className="px-4 py-3 font-mono font-bold text-slate-900">
-                                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-100 text-amber-900 border border-amber-200 font-bold">
-                                  {po.id}
-                                </span>
+                                <div className="flex flex-col gap-1">
+                                  <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-100 text-amber-900 border border-amber-200 font-bold w-fit">
+                                    {po.id}
+                                  </span>
+                                  {rejectedPOItems.length > 0 && (
+                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-rose-100 text-rose-800 border border-rose-300 text-[10px] font-sans font-bold w-fit">
+                                      <Ban className="w-3 h-3 text-rose-600 shrink-0" />
+                                      {rejectedPOItems.length} Barang Ditolak Purchasing
+                                    </span>
+                                  )}
+                                </div>
                               </td>
                               <td className="px-4 py-3 text-slate-700 font-medium">
                                 {formatDate(po.generatedDate)}
                               </td>
                               <td className="px-4 py-3 text-center font-bold text-slate-800">
-                                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-700 border border-slate-200 text-[11px]">
-                                  <Package className="w-3 h-3 text-amber-600" />
-                                  {po.items.length} Item
-                                </span>
+                                <div className="flex flex-col items-center gap-1">
+                                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-700 border border-slate-200 text-[11px]">
+                                    <Package className="w-3 h-3 text-amber-600" />
+                                    {po.items.length} Item
+                                  </span>
+                                  {rejectedPOItems.length > 0 && (
+                                    <span className="text-[10px] font-bold text-rose-700">
+                                      ({rejectedPOItems.length} Ditolak)
+                                    </span>
+                                  )}
+                                </div>
                               </td>
                               <td className="px-4 py-3 text-center">
-                                <span
-                                  className={`inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold ${
-                                    po.status === 'Draft PO'
-                                      ? 'bg-slate-100 text-slate-800 border border-slate-300'
-                                      : po.status === 'Submitted to Purchasing'
-                                      ? 'bg-amber-100 text-amber-900 border border-amber-300'
-                                      : po.status === 'Review Cost Control'
-                                      ? 'bg-purple-100 text-purple-900 border border-purple-300'
-                                      : po.status === 'Approved by Cost Control'
-                                      ? 'bg-emerald-100 text-emerald-900 border border-emerald-300'
-                                      : 'bg-indigo-100 text-indigo-900 border border-indigo-200'
-                                  }`}
-                                >
-                                  {po.status}
-                                </span>
+                                <div className="flex flex-col items-center gap-1">
+                                  <span
+                                    className={`inline-block px-2.5 py-0.5 rounded-full text-[10px] font-bold ${
+                                      po.status === 'Draft PO'
+                                        ? 'bg-slate-100 text-slate-800 border border-slate-300'
+                                        : po.status === 'Submitted to Purchasing'
+                                        ? 'bg-amber-100 text-amber-900 border border-amber-300'
+                                        : po.status === 'Review Cost Control'
+                                        ? 'bg-purple-100 text-purple-900 border border-purple-300'
+                                        : po.status === 'Approved by Cost Control'
+                                        ? 'bg-emerald-100 text-emerald-900 border border-emerald-300'
+                                        : 'bg-indigo-100 text-indigo-900 border border-indigo-200'
+                                    }`}
+                                  >
+                                    {po.status}
+                                  </span>
+                                  {rejectedPOItems.length > 0 && (
+                                    <span className="text-[10px] text-rose-700 font-semibold max-w-[200px] truncate" title={rejectedPOItems.map((r) => `${r.itemName}: ${r.rejectionReason || 'Ditolak Purchasing'}`).join(' | ')}>
+                                      Ket: {rejectedPOItems.map((r) => `${r.itemName} (${r.rejectionReason || 'Ditolak Purchasing'})`).join(', ')}
+                                    </span>
+                                  )}
+                                </div>
                               </td>
                               <td className="px-4 py-3 text-center relative" onClick={(e) => e.stopPropagation()}>
                                 <div className="relative inline-block text-left">
@@ -1638,6 +1825,35 @@ export const PurchaseRequestSection: React.FC = () => {
                                             </p>
                                           </div>
                                         </button>
+
+                                        {/* Opsi Tambahan: Lepas Semua Merge Multi-Outlet */}
+                                        {po.items.some(
+                                          (it) =>
+                                            it.isMerged ||
+                                            (it.outletBreakdowns && it.outletBreakdowns.length > 1)
+                                        ) && (
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              setOpenActionMenuPOId(null);
+                                              setSelectedPOId(po.id);
+                                              handleUnmergeAllPOItems(po.id);
+                                            }}
+                                            className="w-full flex items-start gap-2.5 p-2 rounded-xl hover:bg-indigo-50/80 border border-transparent hover:border-indigo-200 transition group text-left cursor-pointer"
+                                          >
+                                            <div className="p-1.5 rounded-lg bg-indigo-100 text-indigo-700 group-hover:bg-indigo-600 group-hover:text-white transition shrink-0 mt-0.5">
+                                              <Layers className="w-3.5 h-3.5" />
+                                            </div>
+                                            <div className="flex-1 min-w-0">
+                                              <span className="font-bold text-xs text-slate-900 group-hover:text-indigo-700 block">
+                                                Lepas Merge Multi-Outlet
+                                              </span>
+                                              <p className="text-[11px] text-slate-500 mt-0.5 leading-relaxed">
+                                                Fungsi: Pisahkan seluruh item gabungan multi-outlet menjadi baris terpisah per masing-masing outlet.
+                                              </p>
+                                            </div>
+                                          </button>
+                                        )}
 
                                         {/* Opsi 3: Submit PO ke Tim Purchasing */}
                                         {!isSubmittedToPurchasing ? (
@@ -1742,6 +1958,21 @@ export const PurchaseRequestSection: React.FC = () => {
                                     </div>
 
                                     <div className="flex flex-wrap items-center gap-1.5 self-start sm:self-auto">
+                                      {po.items.some(
+                                        (it) =>
+                                          it.isMerged ||
+                                          (it.outletBreakdowns && it.outletBreakdowns.length > 1)
+                                      ) && (
+                                        <button
+                                          type="button"
+                                          onClick={() => handleUnmergeAllPOItems(po.id)}
+                                          className="flex items-center gap-1 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold transition shadow-xs cursor-pointer"
+                                          title="Pisahkan semua item gabungan multi-outlet menjadi baris per-outlet"
+                                        >
+                                          <Layers className="w-3.5 h-3.5" />
+                                          Lepas Merge Multi-Outlet
+                                        </button>
+                                      )}
                                       <button
                                         type="button"
                                         onClick={() => handleOpenAddPOItemModal(po)}
@@ -1789,6 +2020,33 @@ export const PurchaseRequestSection: React.FC = () => {
                                       </button>
                                     </div>
                                   </div>
+
+                                  {/* Keterangan Barang Ditolak oleh Purchasing */}
+                                  {rejectedPOItems.length > 0 && (
+                                    <div className="mx-3.5 mt-3 p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-900 space-y-1.5">
+                                      <div className="font-bold flex items-center gap-1.5 text-rose-800">
+                                        <Ban className="w-4 h-4 text-rose-600 shrink-0" />
+                                        <span>
+                                          Keterangan Penolakan Barang dari Purchasing ({rejectedPOItems.length} Barang Ditolak):
+                                        </span>
+                                      </div>
+                                      <div className="space-y-1 pl-5">
+                                        {rejectedPOItems.map((rej, rIdx) => (
+                                          <div
+                                            key={`${rej.sku}-${rIdx}`}
+                                            className="flex flex-wrap items-center gap-1.5 text-[11px] bg-white/90 px-2.5 py-1 rounded-lg border border-rose-200"
+                                          >
+                                            <span className="font-mono font-bold text-rose-800">[{rej.sku}]</span>
+                                            <span className="font-bold text-slate-900">{rej.itemName}</span>
+                                            <span className="text-slate-500">({rej.qty} {rej.unit} • {rej.place || '-'})</span>
+                                            <span className="text-rose-700 font-semibold">
+                                              — Alasan Ditolak: "{rej.rejectionReason || 'Stok vendor kosong / ditolak oleh Purchasing'}"
+                                            </span>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  )}
 
                                   {/* Search & Filter Toolbar for Items inside Selected PO */}
                                   <div
@@ -1892,96 +2150,151 @@ export const PurchaseRequestSection: React.FC = () => {
                                             </td>
                                           </tr>
                                         ) : (
-                                          filteredPOItems.map((it, idx) => (
-                                            <tr key={`${it.sku}-${idx}`} className="hover:bg-slate-50">
-                                              <td className="px-3 py-2 font-mono font-bold text-slate-800">
-                                                {it.sku}
-                                              </td>
-                                              <td className="px-3 py-2 font-medium text-slate-900">
-                                                <div className="flex items-center gap-1.5 flex-wrap">
-                                                  <span>{it.itemName}</span>
-                                                  {it.isMerged && (
-                                                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-indigo-100 text-indigo-700 border border-indigo-200 shadow-2xs">
-                                                      <Layers className="w-3 h-3 text-indigo-600" />
-                                                      Merge Multi-Outlet
-                                                    </span>
-                                                  )}
-                                                </div>
-                                              </td>
-                                              <td className="px-3 py-2 text-slate-600">{it.category}</td>
-
-                                              {/* Qty (Field Bebas) */}
-                                              <td className="px-3 py-2 text-center" onClick={(e) => e.stopPropagation()}>
-                                                {isSubmittedToPurchasing ? (
-                                                  <span className={`font-bold text-slate-900 ${it.isMerged ? 'text-indigo-700 font-black' : ''}`}>
-                                                    {it.qty}
-                                                  </span>
-                                                ) : (
-                                                  <div className="flex items-center justify-center">
-                                                    <input
-                                                      type="number"
-                                                      min="0"
-                                                      value={it.qty === 0 ? '' : it.qty}
-                                                      onChange={(e) => {
-                                                        const val = e.target.value === '' ? 0 : Math.max(0, parseInt(e.target.value) || 0);
-                                                        handleDirectUpdatePOItemQty(po.id, it.sku, it.place, val);
-                                                      }}
-                                                      placeholder="0"
-                                                      className="w-20 px-2 py-1 text-center font-bold text-slate-900 bg-white border border-slate-300 hover:border-amber-400 focus:border-amber-600 focus:ring-2 focus:ring-amber-100 rounded-lg text-xs outline-hidden shadow-2xs transition"
-                                                      title="Ubah Qty bebas langsung di tabel"
-                                                    />
-                                                  </div>
-                                                )}
-                                              </td>
-
-                                              <td className="px-3 py-2 text-center text-slate-600 font-medium">{it.unit}</td>
-
-                                              <td className="px-3 py-2 text-slate-700">
-                                                {it.isMerged || (it.outletBreakdowns && it.outletBreakdowns.length > 1) ? (
-                                                  <div className="space-y-1 py-0.5">
-                                                    <div className="flex items-center gap-1.5">
-                                                      <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-700 bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-100">
-                                                        Rincian Pesanan ({it.outletBreakdowns?.length || 2} Outlet):
+                                          filteredPOItems.map((it, idx) => {
+                                            const isItemRejected =
+                                              it.status === 'Rejected' || it.approvalStatus === 'Rejected';
+                                            return (
+                                              <tr
+                                                key={`${it.sku}-${idx}`}
+                                                className={`hover:bg-slate-50 ${
+                                                  isItemRejected ? 'bg-rose-50/60' : ''
+                                                }`}
+                                              >
+                                                <td className="px-3 py-2 font-mono font-bold text-slate-800">
+                                                  {it.sku}
+                                                </td>
+                                                <td className="px-3 py-2 font-medium text-slate-900">
+                                                  <div className="flex flex-col gap-1">
+                                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                                      <span className={isItemRejected ? 'line-through text-rose-700 font-semibold' : ''}>
+                                                        {it.itemName}
                                                       </span>
-                                                    </div>
-                                                    <div className="flex flex-col gap-1 text-[11px]">
-                                                      {it.outletBreakdowns?.map((bd, bIdx) => (
-                                                        <div
-                                                          key={bIdx}
-                                                          className="flex items-center gap-1.5 bg-slate-50 px-2 py-0.5 rounded border border-slate-200"
-                                                        >
-                                                          <span className="font-semibold text-slate-900">{bd.outletName}</span>:
-                                                          <span className="font-bold text-indigo-700">{bd.qty} {bd.unit}</span>
-                                                        </div>
-                                                      )) || (
-                                                        <span className="text-slate-700 font-medium">{it.place}</span>
+                                                      {it.isMerged && (
+                                                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-indigo-100 text-indigo-700 border border-indigo-200 shadow-2xs">
+                                                          <Layers className="w-3 h-3 text-indigo-600" />
+                                                          Merge Multi-Outlet
+                                                        </span>
+                                                      )}
+                                                      {isItemRejected && (
+                                                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-300 shadow-2xs">
+                                                          <Ban className="w-3 h-3 text-rose-600" />
+                                                          Ditolak Purchasing
+                                                        </span>
                                                       )}
                                                     </div>
-                                                  </div>
-                                                ) : (
-                                                  <div>
-                                                    <span className="font-medium text-slate-800">{it.place}</span>
-                                                    {it.outletBreakdownText && it.place !== it.outletBreakdownText && (
-                                                      <span className="block text-[11px] text-slate-500">
-                                                        {it.outletBreakdownText}
-                                                      </span>
+                                                    {isItemRejected && (
+                                                      <div className="text-[11px] font-semibold text-rose-700 bg-rose-100/70 border border-rose-200 px-2 py-0.5 rounded-md w-fit">
+                                                        Keterangan Penolakan: "{it.rejectionReason || 'Stok vendor kosong / ditolak oleh Purchasing'}"
+                                                      </div>
                                                     )}
                                                   </div>
-                                                )}
-                                              </td>
-                                              <td className="px-3 py-2 text-center" onClick={(e) => e.stopPropagation()}>
-                                                <button
-                                                  type="button"
-                                                  onClick={() => handleDeletePOItem(it.sku, it.place, po.id)}
-                                                  className="inline-flex items-center gap-1 px-2.5 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-[11px] font-bold transition cursor-pointer"
-                                                  title="Hapus item ini dari PO"
-                                                >
-                                                  <Trash2 className="w-3.5 h-3.5" />
-                                                  <span>Hapus</span>
-                                                </button>
-                                              </td>
-                                            </tr>
-                                          ))
+                                                </td>
+                                                <td className="px-3 py-2 text-slate-600">{it.category}</td>
+
+                                                {/* Qty (Field Bebas) */}
+                                                <td className="px-3 py-2 text-center" onClick={(e) => e.stopPropagation()}>
+                                                  {isSubmittedToPurchasing || isItemRejected ? (
+                                                    <span className={`font-bold text-slate-900 ${it.isMerged ? 'text-indigo-700 font-black' : ''} ${isItemRejected ? 'line-through text-rose-700' : ''}`}>
+                                                      {it.qty}
+                                                    </span>
+                                                  ) : (
+                                                    <div className="flex items-center justify-center">
+                                                      <input
+                                                        type="number"
+                                                        min="0"
+                                                        value={it.qty === 0 ? '' : it.qty}
+                                                        onChange={(e) => {
+                                                          const val = e.target.value === '' ? 0 : Math.max(0, parseInt(e.target.value) || 0);
+                                                          handleDirectUpdatePOItemQty(po.id, it.sku, it.place, val);
+                                                        }}
+                                                        placeholder="0"
+                                                        className="w-20 px-2 py-1 text-center font-bold text-slate-900 bg-white border border-slate-300 hover:border-amber-400 focus:border-amber-600 focus:ring-2 focus:ring-amber-100 rounded-lg text-xs outline-hidden shadow-2xs transition"
+                                                        title="Ubah Qty bebas langsung di tabel"
+                                                      />
+                                                    </div>
+                                                  )}
+                                                </td>
+
+                                                <td className="px-3 py-2 text-center text-slate-600 font-medium">{it.unit}</td>
+
+                                                <td className="px-3 py-2 text-slate-700">
+                                                  {it.isMerged || (it.outletBreakdowns && it.outletBreakdowns.length > 1) ? (
+                                                    <div className="space-y-1 py-0.5">
+                                                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                                                        <span className="text-[10px] font-bold uppercase tracking-wider text-indigo-700 bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-100">
+                                                          Rincian Pesanan ({it.outletBreakdowns?.length || 2} Outlet):
+                                                        </span>
+                                                        <button
+                                                          type="button"
+                                                          onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            handleUnmergePOItem(po.id, it.sku, it.place);
+                                                          }}
+                                                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-600 hover:bg-indigo-700 text-white shadow-2xs transition cursor-pointer"
+                                                          title="Lepas merge item ini menjadi baris terpisah per masing-masing outlet"
+                                                        >
+                                                          <Layers className="w-2.5 h-2.5" />
+                                                          <span>Lepas Merge</span>
+                                                        </button>
+                                                      </div>
+                                                      <div className="flex flex-col gap-1 text-[11px]">
+                                                        {it.outletBreakdowns?.map((bd, bIdx) => (
+                                                          <div
+                                                            key={bIdx}
+                                                            className="flex items-center gap-1.5 bg-slate-50 px-2 py-0.5 rounded border border-slate-200"
+                                                          >
+                                                            <span className="font-semibold text-slate-900">{bd.outletName}</span>:
+                                                            <span className="font-bold text-indigo-700">{bd.qty} {bd.unit}</span>
+                                                          </div>
+                                                        )) || (
+                                                          <span className="text-slate-700 font-medium">{it.place}</span>
+                                                        )}
+                                                      </div>
+                                                    </div>
+                                                  ) : (
+                                                    <div>
+                                                      <span className="font-medium text-slate-800">{it.place}</span>
+                                                      {it.outletBreakdownText && it.place !== it.outletBreakdownText && (
+                                                        <span className="block text-[11px] text-slate-500">
+                                                          {it.outletBreakdownText}
+                                                        </span>
+                                                      )}
+                                                    </div>
+                                                  )}
+                                                  {isItemRejected && (
+                                                    <div className="mt-1 text-[11px] font-bold text-rose-700 flex items-center gap-1">
+                                                      <Ban className="w-3 h-3 text-rose-600 shrink-0" />
+                                                      <span>Ditolak Purchasing: {it.rejectionReason || 'Stok vendor kosong'}</span>
+                                                    </div>
+                                                  )}
+                                                </td>
+                                                <td className="px-3 py-2 text-center" onClick={(e) => e.stopPropagation()}>
+                                                  <div className="inline-flex items-center justify-center gap-1.5 flex-wrap">
+                                                    {(it.isMerged || (it.outletBreakdowns && it.outletBreakdowns.length > 1)) && (
+                                                      <button
+                                                        type="button"
+                                                        onClick={() => handleUnmergePOItem(po.id, it.sku, it.place)}
+                                                        className="inline-flex items-center gap-1 px-2.5 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 rounded-lg text-[11px] font-bold transition cursor-pointer"
+                                                        title="Lepas merge multi-outlet untuk item ini"
+                                                      >
+                                                        <Layers className="w-3.5 h-3.5" />
+                                                        <span>Lepas Merge</span>
+                                                      </button>
+                                                    )}
+                                                    <button
+                                                      type="button"
+                                                      onClick={() => handleDeletePOItem(it.sku, it.place, po.id)}
+                                                      className="inline-flex items-center gap-1 px-2.5 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-[11px] font-bold transition cursor-pointer"
+                                                      title="Hapus item ini dari PO"
+                                                    >
+                                                      <Trash2 className="w-3.5 h-3.5" />
+                                                      <span>Hapus</span>
+                                                    </button>
+                                                  </div>
+                                                </td>
+                                              </tr>
+                                            );
+                                          })
                                         )}
                                       </tbody>
                                     </table>
@@ -2188,6 +2501,21 @@ export const PurchaseRequestSection: React.FC = () => {
                     </span>
                   )}
                 </div>
+              </div>
+
+              {/* Kolom Alasan Penambahan Barang */}
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">
+                  Alasan Penambahan Barang
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={newItemReason}
+                  onChange={(e) => setNewItemReason(e.target.value)}
+                  placeholder="Masukkan alasan penambahan barang..."
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-slate-800 focus:ring-2 focus:ring-amber-500 outline-hidden"
+                />
               </div>
             </div>
 

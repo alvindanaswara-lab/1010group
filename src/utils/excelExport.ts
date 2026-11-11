@@ -221,7 +221,7 @@ export function exportMasterInventoryToExcel(items: InventoryItem[], periodLabel
         const inUsage = item.inbound ?? 0;
         const inVal = item.inboundValue ?? (inUsage * pa);
         const outUsage = item.outbond ?? 0;
-        const outVal = item.outbondValue ?? (outUsage * pb);
+        const outVal = item.outbondValue ?? (outUsage * pa);
         const endUsage = item.endingInventory ?? (begUsage + inUsage - outUsage);
         const endVal = item.endingValue ?? (begVal + inVal - outVal);
         const soUsage = item.stockOpname ?? endUsage;

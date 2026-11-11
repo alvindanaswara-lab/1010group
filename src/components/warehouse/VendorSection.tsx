@@ -147,6 +147,13 @@ export const VendorSection: React.FC = () => {
   // Add item modal inside PO Vendor
   const [showAddItemModal, setShowAddItemModal] = useState<boolean>(false);
   const [newItemSku, setNewItemSku] = useState<string>(inventory[0]?.sku || '');
+  const [addItemSearchQuery, setAddItemSearchQuery] = useState<string>('');
+  const [isAddItemDropdownOpen, setIsAddItemDropdownOpen] = useState<boolean>(false);
+  const [newItemCategory, setNewItemCategory] = useState<ItemCategory>(
+    inventory[0]?.category || 'Dry Item'
+  );
+  const [newItemUnit, setNewItemUnit] = useState<string>(inventory[0]?.unit || 'Kg');
+  const [newItemReason, setNewItemReason] = useState<string>('');
   const [newItemQty, setNewItemQty] = useState<number>(10);
   const [newItemVendor, setNewItemVendor] = useState<string>(vendors[0]?.namaVendor || '');
 
@@ -163,6 +170,7 @@ export const VendorSection: React.FC = () => {
     cashType: 'Cash / COD',
     paymentType: 'TOP 14 Hari',
     pic: '',
+    minimumOrder: 0,
     totalPurchase: 0,
     categories: ['Dry Item'],
   });
@@ -206,11 +214,13 @@ export const VendorSection: React.FC = () => {
     const targetPO = purchaseOrders.find((p) => p.id === poId);
     if (!targetPO) return;
 
-    const unassignedItems = targetPO.items.filter((it) => !it.vendorName || it.vendorName.trim() === '');
+    const unassignedItems = targetPO.items.filter(
+      (it) => it.status !== 'Rejected' && (!it.vendorName || it.vendorName.trim() === '')
+    );
     if (unassignedItems.length > 0) {
       setSubmitMsg({
         type: 'error',
-        text: `Masih ada ${unassignedItems.length} barang yang belum ditentukan vendornya. Silakan pilih vendor untuk semua barang sebelum submit ke Vendor Summary.`,
+        text: `Masih ada ${unassignedItems.length} barang aktif yang belum ditentukan vendornya. Silakan pilih vendor untuk semua barang (atau tolak barang) sebelum submit ke Vendor Summary.`,
       });
       return;
     }
@@ -451,7 +461,12 @@ export const VendorSection: React.FC = () => {
   // Handle Reject item
   const handleConfirmReject = () => {
     if (!activePO || !rejectingItem) return;
-    rejectPOItem(activePO.id, rejectingItem.sku, rejectReason || 'Stok vendor kosong');
+    rejectPOItem(
+      activePO.id,
+      rejectingItem.sku,
+      rejectReason.trim() || 'Stok vendor kosong / ditolak oleh Purchasing',
+      rejectingItem.place
+    );
     setRejectingItem(null);
     setRejectReason('');
   };
@@ -545,22 +560,49 @@ export const VendorSection: React.FC = () => {
     scrollToTop();
   };
 
+  const selectedAddVendorInventoryItem = inventory.find((i) => i.sku === newItemSku) || null;
+  const filteredAddVendorSearchItems = inventory.filter((item) => {
+    if (!addItemSearchQuery.trim()) return true;
+    const q = addItemSearchQuery.toLowerCase();
+    return (
+      item.sku.toLowerCase().includes(q) ||
+      item.itemName.toLowerCase().includes(q) ||
+      item.category.toLowerCase().includes(q)
+    );
+  });
+
+  const handleSelectAddVendorItem = (item: (typeof inventory)[0]) => {
+    setNewItemSku(item.sku);
+    setNewItemCategory(item.category);
+    setNewItemUnit(item.unit);
+    setAddItemSearchQuery('');
+    setIsAddItemDropdownOpen(false);
+  };
+
   // Handle Add Item to PO Vendor
   const handleAddItemToPOVendor = (e: React.FormEvent) => {
     e.preventDefault();
     if (!activePO) return;
-    const inv = inventory.find((i) => i.sku === newItemSku);
+    const inv = inventory.find((i) => i.sku === newItemSku) || inventory[0];
     if (!inv) return;
+
+    const reasonNote = newItemReason.trim()
+      ? `Alasan Penambahan: ${newItemReason.trim()}`
+      : 'Direct Warehouse Vendor Order';
+    const budgetPrice =
+      inv.priceBudget !== undefined && inv.priceBudget > 0
+        ? inv.priceBudget
+        : inv.price ?? 0;
 
     const newItem: POItem = {
       sku: inv.sku,
       itemName: inv.itemName,
-      category: inv.category,
+      category: newItemCategory || inv.category,
       qty: newItemQty,
-      unit: inv.unit,
-      price: inv.price,
-      total: newItemQty * inv.price,
-      place: 'Direct Warehouse Vendor Order',
+      unit: newItemUnit.trim() || inv.unit,
+      price: budgetPrice,
+      total: newItemQty * budgetPrice,
+      place: reasonNote,
       vendorName: newItemVendor,
       status: 'Approved',
     };
@@ -579,9 +621,11 @@ export const VendorSection: React.FC = () => {
       message: `Item [${newItem.sku}] ${newItem.itemName} berhasil ditambahkan langsung ke PO Vendor ${activePO.id}.`,
       details: [
         { label: 'Nomor PO', value: activePO.id },
-        { label: 'Item', value: newItem.itemName },
+        { label: 'Item', value: `${newItem.itemName} (${newItem.sku})` },
+        { label: 'Kategori', value: newItem.category },
         { label: 'Vendor', value: newItemVendor || '-' },
-        { label: 'Qty', value: `${newItem.qty} ${newItem.unit}` },
+        { label: 'Qty & Unit', value: `${newItem.qty} ${newItem.unit}` },
+        { label: 'Alasan Penambahan', value: newItemReason.trim() || '-' },
         { label: 'Total', value: formatRupiah(newItem.total) },
       ],
     });
@@ -589,6 +633,9 @@ export const VendorSection: React.FC = () => {
 
     // Bersihkan form input tambah item
     setNewItemQty(10);
+    setNewItemReason('');
+    setAddItemSearchQuery('');
+    setIsAddItemDropdownOpen(false);
     setNewItemSku(inventory[0]?.sku || '');
     scrollToTop();
   };
@@ -1240,6 +1287,7 @@ export const VendorSection: React.FC = () => {
       cashType: 'Cash / COD',
       paymentType: 'TOP 14 Hari',
       pic: '',
+      minimumOrder: 0,
       totalPurchase: 0,
       categories: ['Dry Item'],
     });
@@ -1255,6 +1303,7 @@ export const VendorSection: React.FC = () => {
       topTerm: v.topTerm || (cat === 'Tempo' ? v.paymentType : 'TOP 14 Hari'),
       cashType: v.cashType || (cat === 'Cash' ? v.paymentType : 'Cash / COD'),
       paymentType: v.paymentType || (cat === 'Tempo' ? 'TOP 14 Hari' : 'Cash / COD'),
+      minimumOrder: v.minimumOrder ?? 0,
     });
     setShowVendorModal(true);
   };
@@ -1267,6 +1316,7 @@ export const VendorSection: React.FC = () => {
     const topTerm = vendorFormData.topTerm || 'TOP 14 Hari';
     const cashType = vendorFormData.cashType || 'Cash / COD';
     const paymentType = category === 'Tempo' ? topTerm : cashType;
+    const minOrder = Math.max(0, Number(vendorFormData.minimumOrder) || 0);
 
     const completeVendor: Partial<Vendor> = {
       ...vendorFormData,
@@ -1274,6 +1324,7 @@ export const VendorSection: React.FC = () => {
       topTerm: category === 'Tempo' ? topTerm : undefined,
       cashType: category === 'Cash' ? cashType : undefined,
       paymentType,
+      minimumOrder: minOrder,
     };
 
     const nama = completeVendor.namaVendor || '';
@@ -1301,6 +1352,7 @@ export const VendorSection: React.FC = () => {
         { label: 'No. Telepon', value: telp },
         { label: 'Kategori Pembayaran', value: category },
         { label: 'Termin / Detail', value: paymentType },
+        { label: 'Nilai Minimum Order', value: formatRupiah(minOrder) },
         { label: 'Aksi', value: isEdit ? 'Update Data' : 'Pendaftaran Baru' },
       ],
     });
@@ -2098,6 +2150,7 @@ export const VendorSection: React.FC = () => {
                                           <th className="px-3 py-2.5">SKU</th>
                                           <th className="px-3 py-2.5">Item Name</th>
                                           <th className="px-3 py-2.5">Category</th>
+                                          <th className="px-3 py-2.5 min-w-[170px]">Alokasi Outlet</th>
                                           <th className="px-3 py-2.5 text-center min-w-[105px]">Qty (Field Bebas)</th>
                                           <th className="px-3 py-2.5 text-center">Unit</th>
                                           <th className="px-3 py-2.5 text-right min-w-[145px]">Harga Satuan (Field Bebas)</th>
@@ -2116,16 +2169,59 @@ export const VendorSection: React.FC = () => {
                                             <tr
                                               key={`${it.sku}-${idx}`}
                                               className={`hover:bg-slate-50 transition ${
-                                                isRejected ? 'bg-red-50/50 opacity-60' : ''
+                                                isRejected ? 'bg-red-50/60 opacity-75' : ''
                                               }`}
                                             >
                                               <td className="px-3 py-2 font-mono font-bold text-slate-800">
                                                 {it.sku}
                                               </td>
                                               <td className="px-3 py-2 font-medium text-slate-900">
-                                                {it.itemName}
+                                                <div className="flex flex-col gap-0.5">
+                                                  <span className={isRejected ? 'line-through text-red-700' : ''}>
+                                                    {it.itemName}
+                                                  </span>
+                                                  {isRejected && (
+                                                    <span className="inline-flex items-center gap-1 text-[10px] font-bold text-red-700 bg-red-100 border border-red-200 px-1.5 py-0.5 rounded w-fit">
+                                                      <Ban className="w-2.5 h-2.5 shrink-0" />
+                                                      Ditolak Purchasing: {it.rejectionReason || 'Stok vendor kosong'}
+                                                    </span>
+                                                  )}
+                                                </div>
                                               </td>
                                               <td className="px-3 py-2 text-slate-600">{it.category}</td>
+
+                                              {/* Alokasi Outlet */}
+                                              <td className="px-3 py-2 text-slate-700">
+                                                {it.isMerged || (it.outletBreakdowns && it.outletBreakdowns.length > 1) ? (
+                                                  <div className="space-y-1 py-0.5">
+                                                    <span className="inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider text-indigo-700 bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-100">
+                                                      Merge ({it.outletBreakdowns?.length || 2} Outlet)
+                                                    </span>
+                                                    <div className="flex flex-col gap-0.5 text-[11px]">
+                                                      {it.outletBreakdowns?.map((bd, bIdx) => (
+                                                        <div
+                                                          key={bIdx}
+                                                          className="flex items-center gap-1 bg-slate-50 px-1.5 py-0.5 rounded border border-slate-200"
+                                                        >
+                                                          <span className="font-semibold text-slate-800">{bd.outletName}</span>:
+                                                          <span className="font-bold text-indigo-700">{bd.qty} {bd.unit}</span>
+                                                        </div>
+                                                      )) || (
+                                                        <span className="text-slate-700 font-medium">{it.place || '-'}</span>
+                                                      )}
+                                                    </div>
+                                                  </div>
+                                                ) : (
+                                                  <div>
+                                                    <span className="font-semibold text-slate-800">{it.place || '-'}</span>
+                                                    {it.outletBreakdownText && it.place !== it.outletBreakdownText && (
+                                                      <span className="block text-[10px] text-slate-500">
+                                                        {it.outletBreakdownText}
+                                                      </span>
+                                                    )}
+                                                  </div>
+                                                )}
+                                              </td>
 
                                               {/* Qty (Field Bebas) */}
                                               <td className="px-3 py-2 text-center" onClick={(e) => e.stopPropagation()}>
@@ -2246,37 +2342,28 @@ export const VendorSection: React.FC = () => {
                                                 </div>
                                               </td>
 
-                                              {/* Action Buttons: Ubah & Tolak Barang */}
-                                              <td className="px-3 py-2 text-center">
+                                              {/* Action Buttons: Tolak Barang */}
+                                              <td className="px-3 py-2 text-center" onClick={(e) => e.stopPropagation()}>
                                                 <div className="flex items-center justify-center gap-1">
-                                                  {!isRejected && (
-                                                    <button
-                                                      onClick={() => {
-                                                        setEditingItem(it);
-                                                        setEditQty(it.qty);
-                                                        setEditPrice(it.price);
-                                                      }}
-                                                      className="p-1 text-slate-500 hover:text-indigo-600 hover:bg-slate-100 rounded-md"
-                                                      title="Ubah Barang"
-                                                    >
-                                                      <Edit2 className="w-3.5 h-3.5" />
-                                                    </button>
-                                                  )}
                                                   {!isRejected ? (
                                                     <button
+                                                      type="button"
                                                       onClick={() => setRejectingItem(it)}
-                                                      className="p-1 text-red-500 hover:text-red-700 hover:bg-red-50 rounded-md"
+                                                      className="inline-flex items-center gap-1 px-2 py-1 text-red-600 hover:text-white bg-red-50 hover:bg-red-600 border border-red-200 rounded-lg text-[11px] font-bold transition cursor-pointer"
                                                       title="Tolak Barang"
                                                     >
                                                       <Ban className="w-3.5 h-3.5" />
+                                                      <span>Tolak</span>
                                                     </button>
                                                   ) : (
                                                     <button
-                                                      onClick={() => handleVendorChangeForItem(it.sku, vendors[0]?.namaVendor || '')}
-                                                      className="p-1 text-emerald-600 hover:text-emerald-700 hover:bg-emerald-50 rounded-md"
-                                                      title="Batalkan Tolak"
+                                                      type="button"
+                                                      onClick={() => handleVendorChangeForItem(it.sku, it.vendorName || vendors[0]?.namaVendor || '', it.place)}
+                                                      className="inline-flex items-center gap-1 px-2 py-1 text-emerald-700 hover:text-white bg-emerald-50 hover:bg-emerald-600 border border-emerald-200 rounded-lg text-[11px] font-bold transition cursor-pointer"
+                                                      title="Batalkan Tolak Barang"
                                                     >
                                                       <Check className="w-3.5 h-3.5" />
+                                                      <span>Batalkan Tolak</span>
                                                     </button>
                                                   )}
                                                 </div>
@@ -3713,12 +3800,20 @@ export const VendorSection: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
-                  <div>
-                    <span className="text-[10px] text-slate-400 block">Total Pembelian:</span>
-                    <span className="text-xs font-black text-slate-900">
-                      {formatRupiah(vendor.totalPurchase)}
-                    </span>
+                <div className="pt-3 border-t border-slate-100 flex items-center justify-between gap-2">
+                  <div className="grid grid-cols-2 gap-3 flex-1">
+                    <div>
+                      <span className="text-[10px] text-slate-400 block">Nilai Minimum Order:</span>
+                      <span className="text-xs font-extrabold text-amber-700 font-mono">
+                        {formatRupiah(vendor.minimumOrder ?? 0)}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-slate-400 block">Total Pembelian:</span>
+                      <span className="text-xs font-black text-slate-900 font-mono">
+                        {formatRupiah(vendor.totalPurchase)}
+                      </span>
+                    </div>
                   </div>
 
                   {/* Opsi Pilihan Aksi Vendor */}
@@ -4301,33 +4396,160 @@ export const VendorSection: React.FC = () => {
             </div>
 
             <div className="space-y-3 text-xs">
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">
-                  Pilih Barang
+              {/* Field Pencarian Barang */}
+              <div className="relative">
+                <label className="block font-semibold text-slate-700 mb-1 flex items-center justify-between">
+                  <span className="flex items-center gap-1.5">
+                    <Search className="w-3.5 h-3.5 text-indigo-600" />
+                    Pencarian Barang
+                  </span>
+                  {selectedAddVendorInventoryItem && (
+                    <span className="text-[10px] text-indigo-700 font-bold bg-indigo-50 px-2 py-0.5 rounded-full border border-indigo-200">
+                      Terpilih: {selectedAddVendorInventoryItem.sku}
+                    </span>
+                  )}
                 </label>
-                <select
-                  value={newItemSku}
-                  onChange={(e) => setNewItemSku(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg"
-                >
-                  {inventory.map((inv) => (
-                    <option key={inv.sku} value={inv.sku}>
-                      [{inv.sku}] {inv.itemName} ({inv.category})
-                    </option>
-                  ))}
-                </select>
+
+                <div className="relative">
+                  <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    value={addItemSearchQuery}
+                    onFocus={() => setIsAddItemDropdownOpen(true)}
+                    onChange={(e) => {
+                      setAddItemSearchQuery(e.target.value);
+                      setIsAddItemDropdownOpen(true);
+                    }}
+                    placeholder={
+                      selectedAddVendorInventoryItem
+                        ? `Cari barang lain (saat ini: [${selectedAddVendorInventoryItem.sku}] ${selectedAddVendorInventoryItem.itemName})...`
+                        : 'Ketik SKU, Nama Barang, atau Kategori...'
+                    }
+                    className="w-full pl-9 pr-8 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-hidden"
+                  />
+                  {addItemSearchQuery && (
+                    <button
+                      type="button"
+                      onClick={() => setAddItemSearchQuery('')}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+
+                {isAddItemDropdownOpen && (
+                  <div className="absolute left-0 right-0 top-full mt-1 bg-white border border-slate-300 rounded-xl shadow-xl z-30 max-h-48 overflow-y-auto divide-y divide-slate-100">
+                    {filteredAddVendorSearchItems.length === 0 ? (
+                      <div className="p-3 text-center text-slate-400 text-xs">
+                        Tidak ada barang yang cocok dengan "{addItemSearchQuery}".
+                      </div>
+                    ) : (
+                      filteredAddVendorSearchItems.map((inv) => (
+                        <div
+                          key={inv.sku}
+                          onClick={() => handleSelectAddVendorItem(inv)}
+                          className={`p-2.5 hover:bg-indigo-50 cursor-pointer transition flex items-center justify-between text-xs ${
+                            inv.sku === newItemSku
+                              ? 'bg-indigo-50/80 font-bold text-indigo-900'
+                              : 'text-slate-700'
+                          }`}
+                        >
+                          <div>
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-mono text-[11px] font-bold text-indigo-700 bg-indigo-100/70 px-1.5 py-0.5 rounded">
+                                {inv.sku}
+                              </span>
+                              <span className="font-semibold text-slate-900">{inv.itemName}</span>
+                            </div>
+                            <div className="text-[10px] text-slate-500 mt-0.5 flex items-center gap-2">
+                              <span>Kategori: {inv.category}</span>
+                              <span>•</span>
+                              <span>Unit: {inv.unit}</span>
+                            </div>
+                          </div>
+                          {inv.sku === newItemSku && (
+                            <Check className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+                          )}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
+
+                {selectedAddVendorInventoryItem && (
+                  <div className="mt-2 p-2.5 bg-indigo-50/60 border border-indigo-200 rounded-xl flex items-center justify-between gap-2">
+                    <div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-mono font-bold text-[11px] bg-indigo-600 text-white px-1.5 py-0.5 rounded">
+                          {selectedAddVendorInventoryItem.sku}
+                        </span>
+                        <span className="font-bold text-slate-900">
+                          {selectedAddVendorInventoryItem.itemName}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-slate-600 mt-0.5">
+                        Kategori: <strong>{newItemCategory}</strong> • Unit: <strong>{newItemUnit}</strong>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setIsAddItemDropdownOpen((prev) => !prev)}
+                      className="px-2 py-1 text-[11px] font-bold bg-white text-indigo-800 border border-indigo-300 rounded-lg hover:bg-indigo-100 transition cursor-pointer shrink-0"
+                    >
+                      {isAddItemDropdownOpen ? 'Tutup' : 'Ganti'}
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Kategori & Unit */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Kategori</label>
+                  <select
+                    value={newItemCategory}
+                    onChange={(e) => setNewItemCategory(e.target.value as ItemCategory)}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-slate-50 font-medium text-slate-800 focus:ring-2 focus:ring-indigo-500 outline-hidden"
+                  >
+                    {ITEM_CATEGORIES.map((cat) => (
+                      <option key={cat} value={cat}>
+                        {cat}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">Unit</label>
+                  <input
+                    type="text"
+                    required
+                    value={newItemUnit}
+                    onChange={(e) => setNewItemUnit(e.target.value)}
+                    placeholder="Contoh: Kg, Pack, Pcs, Liter"
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-slate-50 font-semibold text-slate-800 focus:ring-2 focus:ring-indigo-500 outline-hidden"
+                  />
+                </div>
               </div>
 
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">Qty</label>
-                <input
-                  type="number"
-                  min="1"
-                  required
-                  value={newItemQty}
-                  onChange={(e) => setNewItemQty(Math.max(1, parseInt(e.target.value) || 1))}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg font-bold"
-                />
+                <div className="relative">
+                  <input
+                    type="number"
+                    min="1"
+                    required
+                    value={newItemQty}
+                    onChange={(e) => setNewItemQty(Math.max(1, parseInt(e.target.value) || 1))}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-lg font-bold focus:ring-2 focus:ring-indigo-500 outline-hidden"
+                  />
+                  {newItemUnit && (
+                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-500 pointer-events-none">
+                      {newItemUnit}
+                    </span>
+                  )}
+                </div>
               </div>
 
               <div>
@@ -4337,7 +4559,7 @@ export const VendorSection: React.FC = () => {
                 <select
                   value={newItemVendor}
                   onChange={(e) => setNewItemVendor(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-lg font-semibold"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg font-semibold focus:ring-2 focus:ring-indigo-500 outline-hidden"
                 >
                   {vendors.map((v) => (
                     <option key={v.id} value={v.namaVendor}>
@@ -4346,19 +4568,36 @@ export const VendorSection: React.FC = () => {
                   ))}
                 </select>
               </div>
+
+              {/* Kolom Alasan Penambahan Barang */}
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">
+                  Alasan Penambahan Barang
+                </label>
+                <textarea
+                  rows={2}
+                  value={newItemReason}
+                  onChange={(e) => setNewItemReason(e.target.value)}
+                  placeholder="Masukkan alasan penambahan barang ke PO..."
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-hidden"
+                />
+              </div>
             </div>
 
             <div className="flex justify-end gap-2 pt-2">
               <button
                 type="button"
-                onClick={() => setShowAddItemModal(false)}
-                className="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100 rounded-xl"
+                onClick={() => {
+                  setShowAddItemModal(false);
+                  setIsAddItemDropdownOpen(false);
+                }}
+                className="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100 rounded-xl cursor-pointer"
               >
                 Batal
               </button>
               <button
                 type="submit"
-                className="px-4 py-1.5 text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl shadow-xs"
+                className="px-4 py-1.5 text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl shadow-xs cursor-pointer"
               >
                 Tambahkan
               </button>
@@ -4558,6 +4797,32 @@ export const VendorSection: React.FC = () => {
                     className="w-full px-3 py-2 border border-slate-300 rounded-lg"
                   />
                 </div>
+              </div>
+
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1 flex items-center justify-between">
+                  <span>Nilai Minimum Order (Rp)</span>
+                  <span className="text-[10px] font-mono font-bold text-amber-700">
+                    {formatRupiah(Number(vendorFormData.minimumOrder) || 0)}
+                  </span>
+                </label>
+                <input
+                  type="number"
+                  min="0"
+                  step="50000"
+                  value={vendorFormData.minimumOrder ?? 0}
+                  onChange={(e) =>
+                    setVendorFormData({
+                      ...vendorFormData,
+                      minimumOrder: Math.max(0, parseInt(e.target.value, 10) || 0),
+                    })
+                  }
+                  placeholder="Contoh: 500000"
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono font-bold text-slate-800 focus:ring-2 focus:ring-indigo-500 outline-hidden"
+                />
+                <span className="text-[10px] text-slate-400 mt-0.5 block">
+                  Batas nilai minimum pemesanan (MOQ / Minimum Order Value) untuk mitra vendor ini. Isi 0 jika tanpa minimum order.
+                </span>
               </div>
 
               <div>

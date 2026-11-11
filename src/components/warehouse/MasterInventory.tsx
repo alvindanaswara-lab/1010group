@@ -83,10 +83,24 @@ export const MasterInventory: React.FC = () => {
     bulkImportMasterInventory,
     currentUser,
     vendors,
+    receivingRecords,
+    manualInboundRecords,
   } = useApp();
 
   // Active view tab
-  const [activeTab, setActiveTab] = useState<'table' | 'movement' | 'stockOpname'>('table');
+  const [activeTab, setActiveTab] = useState<'table' | 'movement' | 'stockOpname' | 'priceAnalysis'>('table');
+
+  // Price Analysis & Inbound Anomaly Detection states
+  const [upperMarginPct, setUpperMarginPct] = useState<number>(15);
+  const [lowerMarginPct, setLowerMarginPct] = useState<number>(15);
+  const [priceAnalysisFilter, setPriceAnalysisFilter] = useState<'all' | 'anomaly' | 'upper' | 'lower' | 'normal'>('all');
+  const [priceAnalysisSearch, setPriceAnalysisSearch] = useState<string>('');
+
+  // Dedicated filter states for Tabel 2: Evaluasi Harga Actual vs Harga Budget
+  const [evalTableSearch, setEvalTableSearch] = useState<string>('');
+  const [evalTableCategory, setEvalTableCategory] = useState<string>('All');
+  const [evalTableStatus, setEvalTableStatus] = useState<'all' | 'anomaly' | 'upper' | 'lower' | 'normal'>('all');
+  const [evalTableSort, setEvalTableSort] = useState<'default' | 'diffDesc' | 'diffAsc' | 'actualDesc'>('default');
 
   // Search & category filter
   const [search, setSearch] = useState('');
@@ -144,6 +158,161 @@ export const MasterInventory: React.FC = () => {
   const movementReport = useMemo(() => {
     return calculateInventoryManagementReport(activeItems);
   }, [activeItems]);
+
+  // Price Analysis & Inbound Price Anomaly Detection calculations (Acuan: Harga Budget)
+  const priceAnalysisData = useMemo(() => {
+    const upperTol = Math.max(0, upperMarginPct) / 100;
+    const lowerTol = Math.max(0, lowerMarginPct) / 100;
+
+    // 1. Analyze Master Inventory Items (Akumulasi & Average Price Actual vs Price Budget)
+    const itemAnalysisList = activeItems.map((item) => {
+      const budget = item.priceBudget || item.price || 0;
+      const actual = item.priceActual || item.price || budget;
+      const minThreshold = Math.round(budget * (1 - lowerTol));
+      const maxThreshold = Math.round(budget * (1 + upperTol));
+      const diffAmount = actual - budget;
+      const diffPct = budget > 0 ? ((actual - budget) / budget) * 100 : 0;
+
+      let status: 'upper' | 'lower' | 'normal' = 'normal';
+      if (budget > 0) {
+        if (actual > maxThreshold) status = 'upper';
+        else if (actual < minThreshold) status = 'lower';
+      }
+
+      return {
+        item,
+        budget,
+        actual,
+        minThreshold,
+        maxThreshold,
+        diffAmount,
+        diffPct,
+        status,
+      };
+    });
+
+    // 2. Analyze Inbound Price Inputs (Receiving PO Vendor & Manual Incoming Goods) against Price Budget
+    interface InboundPriceTxEntry {
+      id: string;
+      date: string;
+      docId: string;
+      sourceType: 'Receiving PO Vendor' | 'Manual Incoming Goods';
+      sourceName: string;
+      sku: string;
+      itemName: string;
+      category: string;
+      unit: string;
+      qty: number;
+      budgetPrice: number;
+      inputPrice: number;
+      minThreshold: number;
+      maxThreshold: number;
+      diffAmount: number;
+      diffPct: number;
+      status: 'upper' | 'lower' | 'normal';
+    }
+
+    const inboundTxList: InboundPriceTxEntry[] = [];
+
+    // Collect from Receiving PO Vendor records
+    receivingRecords.forEach((rec) => {
+      rec.items.forEach((it) => {
+        const qtyVal = it.receivedQty > 0 ? it.receivedQty : it.orderedQty;
+        const invMatch = activeItems.find((inv) => inv.sku === it.sku);
+        const budget = invMatch?.priceBudget ?? invMatch?.price ?? it.unitPrice ?? 0;
+        const inputPrice = it.unitPrice ?? budget;
+        if (inputPrice <= 0 && budget <= 0) return;
+
+        const minThreshold = Math.round(budget * (1 - lowerTol));
+        const maxThreshold = Math.round(budget * (1 + upperTol));
+        const diffAmount = inputPrice - budget;
+        const diffPct = budget > 0 ? ((inputPrice - budget) / budget) * 100 : 0;
+
+        let status: 'upper' | 'lower' | 'normal' = 'normal';
+        if (budget > 0) {
+          if (inputPrice > maxThreshold) status = 'upper';
+          else if (inputPrice < minThreshold) status = 'lower';
+        }
+
+        inboundTxList.push({
+          id: `${rec.id}-${it.sku}`,
+          date: rec.receiveDate,
+          docId: `${rec.id} (${rec.poVendorId})`,
+          sourceType: 'Receiving PO Vendor',
+          sourceName: rec.vendorName,
+          sku: it.sku,
+          itemName: it.itemName,
+          category: it.category,
+          unit: it.unit,
+          qty: qtyVal,
+          budgetPrice: budget,
+          inputPrice,
+          minThreshold,
+          maxThreshold,
+          diffAmount,
+          diffPct,
+          status,
+        });
+      });
+    });
+
+    // Collect from Manual Incoming Goods records
+    manualInboundRecords.forEach((rec) => {
+      const invMatch = activeItems.find((inv) => inv.sku === rec.sku);
+      const budget = invMatch?.priceBudget ?? invMatch?.price ?? rec.price ?? 0;
+      const inputPrice = rec.price ?? budget;
+      if (inputPrice <= 0 && budget <= 0) return;
+
+      const minThreshold = Math.round(budget * (1 - lowerTol));
+      const maxThreshold = Math.round(budget * (1 + upperTol));
+      const diffAmount = inputPrice - budget;
+      const diffPct = budget > 0 ? ((inputPrice - budget) / budget) * 100 : 0;
+
+      let status: 'upper' | 'lower' | 'normal' = 'normal';
+      if (budget > 0) {
+        if (inputPrice > maxThreshold) status = 'upper';
+        else if (inputPrice < minThreshold) status = 'lower';
+      }
+
+      inboundTxList.push({
+        id: rec.id,
+        date: rec.date,
+        docId: rec.id,
+        sourceType: 'Manual Incoming Goods',
+        sourceName: rec.source,
+        sku: rec.sku,
+        itemName: rec.itemName,
+        category: rec.category,
+        unit: rec.unit,
+        qty: rec.qty,
+        budgetPrice: budget,
+        inputPrice,
+        minThreshold,
+        maxThreshold,
+        diffAmount,
+        diffPct,
+        status,
+      });
+    });
+
+    const upperAnomalyItems = itemAnalysisList.filter((x) => x.status === 'upper');
+    const lowerAnomalyItems = itemAnalysisList.filter((x) => x.status === 'lower');
+    const upperAnomalyTx = inboundTxList.filter((x) => x.status === 'upper');
+    const lowerAnomalyTx = inboundTxList.filter((x) => x.status === 'lower');
+
+    const totalAnomaliesCount =
+      upperAnomalyItems.length + lowerAnomalyItems.length + upperAnomalyTx.length + lowerAnomalyTx.length;
+
+    return {
+      itemAnalysisList,
+      inboundTxList,
+      upperAnomalyItemsCount: upperAnomalyItems.length,
+      lowerAnomalyItemsCount: lowerAnomalyItems.length,
+      upperAnomalyTxCount: upperAnomalyTx.length,
+      lowerAnomalyTxCount: lowerAnomalyTx.length,
+      totalAnomaliesCount,
+    };
+  }, [activeItems, receivingRecords, manualInboundRecords, upperMarginPct, lowerMarginPct]);
 
   // Modal: Create/Edit Master Item
   const [showItemModal, setShowItemModal] = useState(false);
@@ -546,12 +715,14 @@ export const MasterInventory: React.FC = () => {
     const savedUnit = modalItemData.unit || 'Kg';
     const budget = Number(modalItemData.priceBudget) || 0;
     const actual = Number(modalItemData.priceActual) || budget;
+    const inboundQty = Number(modalItemData.inbound) || 0;
     const isEdit = isEditingExisting;
 
     const normalized = normalizeInventoryItem({
       ...modalItemData,
       priceBudget: budget,
       priceActual: actual,
+      inboundValue: Math.round(inboundQty * actual),
       price: budget,
     }, selectedPeriod);
 
@@ -873,6 +1044,27 @@ export const MasterInventory: React.FC = () => {
             {stockOpnameReports.length > 0 && (
               <span className="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.2 rounded-full font-bold">
                 {stockOpnameReports.length}
+              </span>
+            )}
+          </button>
+
+          <button
+            onClick={() => setActiveTab('priceAnalysis')}
+            className={`pb-2.5 px-3 text-xs font-bold transition flex items-center gap-1.5 border-b-2 cursor-pointer ${
+              activeTab === 'priceAnalysis'
+                ? 'border-amber-600 text-amber-700'
+                : 'border-transparent text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            <TrendingUp className="w-4 h-4" />
+            <span>Analisis Harga & Anomali Inbound</span>
+            {priceAnalysisData.totalAnomaliesCount > 0 ? (
+              <span className="text-[10px] bg-rose-100 text-rose-700 border border-rose-200 px-1.5 py-0.2 rounded-full font-extrabold">
+                {priceAnalysisData.totalAnomaliesCount} Anomali
+              </span>
+            ) : (
+              <span className="text-[10px] bg-emerald-100 text-emerald-700 px-1.5 py-0.2 rounded-full font-bold">
+                Normal
               </span>
             )}
           </button>
@@ -1360,11 +1552,63 @@ export const MasterInventory: React.FC = () => {
                             )}
                           </td>
 
-                          <td className="px-3 py-2 text-right font-mono text-slate-700 border-r border-slate-100 bg-slate-50/50">
-                            {formatRupiah(item.priceBudget || item.price)}
+                          <td
+                            className="px-3 py-2 text-right font-mono text-slate-700 border-r border-slate-100 bg-slate-50/50"
+                            title="Harga Budget: Digunakan untuk Beginning Value, Purchase Request, dan Purchasing & Vendor"
+                          >
+                            <div className="flex flex-col items-end">
+                              <span className="font-bold text-slate-800">
+                                {formatRupiah(item.priceBudget || item.price)}
+                              </span>
+                              <span className="text-[9px] font-sans text-slate-400">
+                                Beg / PR / PO
+                              </span>
+                            </div>
                           </td>
-                          <td className="px-3 py-2 text-right font-mono text-slate-700 border-r border-slate-100 bg-slate-50/50">
-                            {formatRupiah(item.priceActual || item.price)}
+                          <td
+                            className="px-3 py-2 text-right font-mono text-slate-700 border-r border-slate-100 bg-slate-50/50"
+                            title="Harga Actual: Diakumulasi & di-average dari harga masuk Inbound. Digunakan untuk Inbound Value & Outbond Value"
+                          >
+                            {(() => {
+                              const budgetVal = item.priceBudget || item.price || 0;
+                              const actualVal = item.priceActual || item.price || budgetVal;
+                              const diffPct = budgetVal > 0 ? ((actualVal - budgetVal) / budgetVal) * 100 : 0;
+                              const isOver = budgetVal > 0 && diffPct > upperMarginPct;
+                              const isUnder = budgetVal > 0 && diffPct < -lowerMarginPct;
+                              return (
+                                <div className="flex flex-col items-end gap-0.5">
+                                  <span
+                                    className={`font-bold ${
+                                      isOver
+                                        ? 'text-rose-700'
+                                        : isUnder
+                                        ? 'text-amber-700'
+                                        : 'text-emerald-800'
+                                    }`}
+                                  >
+                                    {formatRupiah(actualVal)}
+                                  </span>
+                                  {(isOver || isUnder) ? (
+                                    <span
+                                      onClick={() => setActiveTab('priceAnalysis')}
+                                      className={`inline-flex items-center gap-0.5 px-1.5 py-0.2 rounded text-[9px] font-sans font-extrabold cursor-pointer border ${
+                                        isOver
+                                          ? 'bg-rose-100 text-rose-800 border-rose-300'
+                                          : 'bg-amber-100 text-amber-800 border-amber-300'
+                                      }`}
+                                      title={`Anomali Harga Actual terhadap Harga Budget (${diffPct > 0 ? '+' : ''}${diffPct.toFixed(1)}%). Klik untuk buka Analisis Harga.`}
+                                    >
+                                      <AlertTriangle className="w-2.5 h-2.5 shrink-0" />
+                                      {diffPct > 0 ? `+${diffPct.toFixed(1)}%` : `${diffPct.toFixed(1)}%`}
+                                    </span>
+                                  ) : (
+                                    <span className="text-[9px] font-sans text-slate-400">
+                                      Avg Inbound / Outbond
+                                    </span>
+                                  )}
+                                </div>
+                              );
+                            })()}
                           </td>
 
                           {/* Beginning */}
@@ -1819,6 +2063,557 @@ export const MasterInventory: React.FC = () => {
                 })}
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* TAB 4: ANALISIS HARGA & DETEKSI ANOMALI INPUTAN HARGA INBOUND */}
+      {activeTab === 'priceAnalysis' && (
+        <div className="space-y-4">
+          {/* Header & Kebijakan Penempatan Harga */}
+          <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs space-y-4">
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-4 border-b border-slate-100">
+              <div className="space-y-1">
+                <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                  <TrendingUp className="w-5 h-5 text-amber-600" />
+                  Analisis Harga & Deteksi Anomali Inputan Harga Inbound
+                </h3>
+                <p className="text-xs text-slate-500">
+                  Memonitor akumulasi rata-rata <strong>Harga Actual</strong> dan mendeteksi anomali inputan harga pada <strong>Inbound</strong> dengan menjadikan <strong>Harga Budget</strong> sebagai acuan.
+                </p>
+              </div>
+
+              {/* Pengaturan Batas Toleransi Margin Atas & Bawah */}
+              <div className="flex flex-wrap items-center gap-3 bg-slate-50 p-3 rounded-xl border border-slate-200 text-xs">
+                <div className="flex items-center gap-2">
+                  <span className="font-bold text-slate-700">Margin Atas (+%):</span>
+                  <input
+                    type="number"
+                    min="1"
+                    max="200"
+                    value={upperMarginPct}
+                    onChange={(e) => setUpperMarginPct(Math.max(1, parseInt(e.target.value, 10) || 15))}
+                    className="w-16 px-2 py-1 bg-white border border-slate-300 rounded-lg font-mono font-bold text-center text-rose-700 focus:ring-2 focus:ring-amber-500 outline-hidden"
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="font-bold text-slate-700">Margin Bawah (-%):</span>
+                  <input
+                    type="number"
+                    min="1"
+                    max="100"
+                    value={lowerMarginPct}
+                    onChange={(e) => setLowerMarginPct(Math.max(1, parseInt(e.target.value, 10) || 15))}
+                    className="w-16 px-2 py-1 bg-white border border-slate-300 rounded-lg font-mono font-bold text-center text-amber-700 focus:ring-2 focus:ring-amber-500 outline-hidden"
+                  />
+                </div>
+                <div className="flex items-center gap-1 border-l border-slate-200 pl-2">
+                  {[10, 15, 20, 25].map((pct) => (
+                    <button
+                      key={pct}
+                      type="button"
+                      onClick={() => {
+                        setUpperMarginPct(pct);
+                        setLowerMarginPct(pct);
+                      }}
+                      className={`px-2 py-1 rounded-md text-[10px] font-bold transition cursor-pointer ${
+                        upperMarginPct === pct && lowerMarginPct === pct
+                          ? 'bg-amber-600 text-white'
+                          : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-100'
+                      }`}
+                    >
+                      ±{pct}%
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Info Skema Penempatan Harga */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-1">
+                <div className="font-extrabold text-slate-800 flex items-center gap-1.5">
+                  <ShieldCheck className="w-4 h-4 text-blue-600" />
+                  1. Penempatan Harga Budget (Acuan Standar)
+                </div>
+                <p className="text-slate-600 text-[11px] leading-relaxed">
+                  Digunakan untuk perhitungan <strong>Beginning Inventory Value</strong>, harga standar pada <strong>Purchase Request (PR & PO)</strong>, serta <strong>Purchasing & Vendor</strong>. Menjadi acuan dasar (benchmark) untuk mendeteksi anomali harga masuk.
+                </p>
+              </div>
+              <div className="p-3.5 rounded-xl bg-emerald-50/60 border border-emerald-200 space-y-1">
+                <div className="font-extrabold text-emerald-900 flex items-center gap-1.5">
+                  <RefreshCw className="w-4 h-4 text-emerald-600" />
+                  2. Penempatan Harga Actual (Akumulasi & Average Inbound)
+                </div>
+                <p className="text-emerald-800 text-[11px] leading-relaxed">
+                  Digunakan untuk perhitungan <strong>Inbound Value</strong> dan <strong>Outbond Value</strong>. Setiap harga satuan yang di-input pada transaksi <strong>Inbound</strong> otomatis diakumulasi dan di-average (rata-rata tertimbang) ke dalam <strong>Harga Actual</strong>.
+                </p>
+              </div>
+            </div>
+
+            {/* 4 Summary Cards */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
+              <div className="p-3.5 rounded-xl border border-slate-200 bg-white space-y-1">
+                <span className="text-[10px] font-bold uppercase text-slate-400">
+                  Total SKU & Transaksi Inbound
+                </span>
+                <div className="text-lg font-black text-slate-900">
+                  {priceAnalysisData.itemAnalysisList.length} SKU / {priceAnalysisData.inboundTxList.length} Transaksi
+                </div>
+                <div className="text-[11px] text-slate-500">
+                  Acuan Toleransi: -{lowerMarginPct}% s/d +{upperMarginPct}% dari Budget
+                </div>
+              </div>
+
+              <div className="p-3.5 rounded-xl border border-rose-200 bg-rose-50/40 space-y-1">
+                <span className="text-[10px] font-bold uppercase text-rose-700 flex items-center gap-1">
+                  <TrendingUp className="w-3.5 h-3.5" />
+                  Anomali Margin Atas (&gt; +{upperMarginPct}%)
+                </span>
+                <div className="text-lg font-black text-rose-700">
+                  {priceAnalysisData.upperAnomalyItemsCount} SKU • {priceAnalysisData.upperAnomalyTxCount} Input Inbound
+                </div>
+                <div className="text-[11px] text-rose-600 font-medium">
+                  Harga melampaui batas toleransi atas Harga Budget
+                </div>
+              </div>
+
+              <div className="p-3.5 rounded-xl border border-amber-200 bg-amber-50/40 space-y-1">
+                <span className="text-[10px] font-bold uppercase text-amber-800 flex items-center gap-1">
+                  <TrendingDown className="w-3.5 h-3.5" />
+                  Anomali Margin Bawah (&lt; -{lowerMarginPct}%)
+                </span>
+                <div className="text-lg font-black text-amber-800">
+                  {priceAnalysisData.lowerAnomalyItemsCount} SKU • {priceAnalysisData.lowerAnomalyTxCount} Input Inbound
+                </div>
+                <div className="text-[11px] text-amber-700 font-medium">
+                  Harga terlalu jauh di bawah batas toleransi Harga Budget
+                </div>
+              </div>
+
+              <div className="p-3.5 rounded-xl border border-emerald-200 bg-emerald-50/40 space-y-1">
+                <span className="text-[10px] font-bold uppercase text-emerald-700 flex items-center gap-1">
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  Status Harga Normal (Wajar)
+                </span>
+                <div className="text-lg font-black text-emerald-700">
+                  {priceAnalysisData.itemAnalysisList.filter((i) => i.status === 'normal').length} SKU Normal
+                </div>
+                <div className="text-[11px] text-emerald-600 font-medium">
+                  Berada dalam rentang margin wajar terhadap Harga Budget
+                </div>
+              </div>
+            </div>
+
+            {/* Filter & Search Bar */}
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 pt-2">
+              <div className="relative flex-1 max-w-md">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={priceAnalysisSearch}
+                  onChange={(e) => setPriceAnalysisSearch(e.target.value)}
+                  placeholder="Cari SKU, nama barang, dokumen inbound, atau vendor..."
+                  className="w-full pl-9 pr-4 py-2 text-xs border border-slate-200 rounded-xl focus:ring-2 focus:ring-amber-500 outline-hidden"
+                />
+              </div>
+
+              <div className="flex items-center gap-1.5 flex-wrap">
+                {[
+                  { id: 'all', label: 'Semua Data' },
+                  { id: 'anomaly', label: 'Hanya Anomali' },
+                  { id: 'upper', label: `Margin Atas (> +${upperMarginPct}%)` },
+                  { id: 'lower', label: `Margin Bawah (< -${lowerMarginPct}%)` },
+                  { id: 'normal', label: 'Normal' },
+                ].map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setPriceAnalysisFilter(tab.id as any)}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold transition cursor-pointer ${
+                      priceAnalysisFilter === tab.id
+                        ? 'bg-slate-900 text-white shadow-2xs'
+                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* TABEL 1: DETEKSI ANOMALI INPUTAN HARGA PADA TRANSAKSI INBOUND */}
+          <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs space-y-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <h4 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 text-rose-600" />
+                  Deteksi Anomali Inputan Harga pada Transaksi Inbound (Acuan: Harga Budget)
+                </h4>
+                <p className="text-xs text-slate-500">
+                  Menganalisis setiap input harga masuk dari Receiving PO Vendor & Manual Incoming Goods terhadap Harga Budget Master Inventory.
+                </p>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto rounded-xl border border-slate-200">
+              <table className="w-full text-left text-xs whitespace-nowrap">
+                <thead className="bg-slate-800 text-white font-bold text-[11px] uppercase">
+                  <tr>
+                    <th className="px-3 py-2.5">Tanggal</th>
+                    <th className="px-3 py-2.5">Dokumen Inbound</th>
+                    <th className="px-3 py-2.5">Sumber / Vendor</th>
+                    <th className="px-3 py-2.5">SKU & Nama Barang</th>
+                    <th className="px-3 py-2.5 text-right">Qty Masuk</th>
+                    <th className="px-3 py-2.5 text-right bg-slate-700">Harga Budget (Acuan)</th>
+                    <th className="px-3 py-2.5 text-center bg-slate-700">Rentang Toleransi Normal</th>
+                    <th className="px-3 py-2.5 text-right bg-emerald-900 text-emerald-100">Harga Input Inbound</th>
+                    <th className="px-3 py-2.5 text-right">Selisih Margin</th>
+                    <th className="px-3 py-2.5 text-center">Status Analisis</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {(() => {
+                    const filteredTx = priceAnalysisData.inboundTxList.filter((tx) => {
+                      const matchSearch =
+                        !priceAnalysisSearch.trim() ||
+                        tx.sku.toLowerCase().includes(priceAnalysisSearch.toLowerCase()) ||
+                        tx.itemName.toLowerCase().includes(priceAnalysisSearch.toLowerCase()) ||
+                        tx.docId.toLowerCase().includes(priceAnalysisSearch.toLowerCase()) ||
+                        tx.sourceName.toLowerCase().includes(priceAnalysisSearch.toLowerCase());
+                      const matchFilter =
+                        priceAnalysisFilter === 'all'
+                          ? true
+                          : priceAnalysisFilter === 'anomaly'
+                          ? tx.status !== 'normal'
+                          : tx.status === priceAnalysisFilter;
+                      return matchSearch && matchFilter;
+                    });
+
+                    if (filteredTx.length === 0) {
+                      return (
+                        <tr>
+                          <td colSpan={10} className="py-10 text-center text-slate-400">
+                            {priceAnalysisData.inboundTxList.length === 0
+                              ? 'Belum ada riwayat inputan harga transaksi Inbound. Setiap input harga di Inbound akan dianalisis otomatis di sini.'
+                              : 'Tidak ada transaksi Inbound yang sesuai dengan filter anomali saat ini.'}
+                          </td>
+                        </tr>
+                      );
+                    }
+
+                    return filteredTx.map((tx) => (
+                      <tr
+                        key={tx.id}
+                        className={`transition ${
+                          tx.status === 'upper'
+                            ? 'bg-rose-50/60 hover:bg-rose-100/60'
+                            : tx.status === 'lower'
+                            ? 'bg-amber-50/60 hover:bg-amber-100/60'
+                            : 'hover:bg-slate-50'
+                        }`}
+                      >
+                        <td className="px-3 py-2.5 font-mono text-slate-600">{tx.date}</td>
+                        <td className="px-3 py-2.5">
+                          <div className="font-mono font-bold text-slate-800">{tx.docId}</div>
+                          <div className="text-[10px] text-slate-500">{tx.sourceType}</div>
+                        </td>
+                        <td className="px-3 py-2.5 font-medium text-slate-700">{tx.sourceName}</td>
+                        <td className="px-3 py-2.5">
+                          <div className="font-bold text-slate-900">{tx.itemName}</div>
+                          <div className="text-[10px] font-mono text-slate-500">
+                            {tx.sku} • {tx.category}
+                          </div>
+                        </td>
+                        <td className="px-3 py-2.5 text-right font-mono font-bold text-emerald-700">
+                          +{tx.qty} {tx.unit}
+                        </td>
+                        <td className="px-3 py-2.5 text-right font-mono font-bold text-slate-800 bg-slate-50/60">
+                          {formatRupiah(tx.budgetPrice)}
+                        </td>
+                        <td className="px-3 py-2.5 text-center font-mono text-[11px] text-slate-600 bg-slate-50/60">
+                          {formatRupiah(tx.minThreshold)} – {formatRupiah(tx.maxThreshold)}
+                        </td>
+                        <td className="px-3 py-2.5 text-right font-mono font-black text-slate-900">
+                          {formatRupiah(tx.inputPrice)}
+                        </td>
+                        <td className="px-3 py-2.5 text-right font-mono font-bold">
+                          <span
+                            className={
+                              tx.diffAmount > 0
+                                ? 'text-rose-600'
+                                : tx.diffAmount < 0
+                                ? 'text-amber-700'
+                                : 'text-emerald-600'
+                            }
+                          >
+                            {tx.diffAmount > 0 ? '+' : ''}
+                            {formatRupiah(tx.diffAmount)} ({tx.diffPct > 0 ? `+${tx.diffPct.toFixed(1)}%` : `${tx.diffPct.toFixed(1)}%`})
+                          </span>
+                        </td>
+                        <td className="px-3 py-2.5 text-center">
+                          {tx.status === 'upper' ? (
+                            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-extrabold bg-rose-100 text-rose-800 border border-rose-300">
+                              <AlertTriangle className="w-3 h-3" />
+                              Anomali Margin Atas
+                            </span>
+                          ) : tx.status === 'lower' ? (
+                            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-extrabold bg-amber-100 text-amber-900 border border-amber-300">
+                              <AlertTriangle className="w-3 h-3" />
+                              Anomali Margin Bawah
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
+                              <CheckCircle2 className="w-3 h-3" />
+                              Wajar / Normal
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    ));
+                  })()}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* TABEL 2: ANALISIS AKUMULASI & AVERAGE HARGA ACTUAL VS HARGA BUDGET PER BARANG */}
+          <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs space-y-3.5">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-2 border-b border-slate-100">
+              <div>
+                <h4 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <BarChart3 className="w-4 h-4 text-amber-600" />
+                  Evaluasi Harga Actual (Average Inbound) vs Harga Budget pada Master Inventory
+                </h4>
+                <p className="text-xs text-slate-500">
+                  Perbandingan antara <strong>Harga Budget</strong> (acuan Beginning Value, Purchase Request, Purchasing & Vendor) dengan <strong>Harga Actual</strong> (hasil akumulasi & average Inbound yang digunakan untuk Inbound Value dan Outbond Value).
+                </p>
+              </div>
+              <span className="px-2.5 py-1 rounded-full bg-slate-100 text-slate-700 border border-slate-200 text-[11px] font-bold self-start sm:self-center shrink-0">
+                Total: {priceAnalysisData.itemAnalysisList.length} Barang
+              </span>
+            </div>
+
+            {/* Dedicated Filter Toolbar for Evaluasi Harga Actual vs Harga Budget */}
+            <div className="bg-slate-50/90 p-3 rounded-xl border border-slate-200 space-y-2.5 text-xs">
+              <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-2.5">
+                {/* Search SKU / Item Name */}
+                <div className="relative flex-1 min-w-[220px]">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  <input
+                    type="text"
+                    value={evalTableSearch}
+                    onChange={(e) => setEvalTableSearch(e.target.value)}
+                    placeholder="Cari SKU atau nama barang pada tabel ini..."
+                    className="w-full pl-8 pr-8 py-1.5 bg-white border border-slate-300 rounded-lg text-xs focus:ring-2 focus:ring-amber-500 outline-hidden"
+                  />
+                  {evalTableSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setEvalTableSearch('')}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+
+                {/* Filter Kategori, Status Anomali & Urutan */}
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex items-center gap-1.5">
+                    <Filter className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                    <span className="font-bold text-slate-600">Kategori:</span>
+                    <select
+                      value={evalTableCategory}
+                      onChange={(e) => setEvalTableCategory(e.target.value)}
+                      className="bg-white border border-slate-300 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-slate-800 focus:ring-2 focus:ring-amber-500 outline-hidden"
+                    >
+                      <option value="All">Semua Kategori</option>
+                      {ITEM_CATEGORIES.map((cat) => (
+                        <option key={cat} value={cat}>
+                          {cat}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-bold text-slate-600">Status:</span>
+                    <select
+                      value={evalTableStatus}
+                      onChange={(e) => setEvalTableStatus(e.target.value as any)}
+                      className="bg-white border border-slate-300 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-slate-800 focus:ring-2 focus:ring-amber-500 outline-hidden"
+                    >
+                      <option value="all">Semua Status</option>
+                      <option value="anomaly">Semua Anomali</option>
+                      <option value="upper">Margin Atas (&gt; +{upperMarginPct}%)</option>
+                      <option value="lower">Margin Bawah (&lt; -{lowerMarginPct}%)</option>
+                      <option value="normal">Normal / Wajar</option>
+                    </select>
+                  </div>
+
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-bold text-slate-600">Urutkan:</span>
+                    <select
+                      value={evalTableSort}
+                      onChange={(e) => setEvalTableSort(e.target.value as any)}
+                      className="bg-white border border-slate-300 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-slate-800 focus:ring-2 focus:ring-amber-500 outline-hidden"
+                    >
+                      <option value="default">Default (SKU)</option>
+                      <option value="diffDesc">Deviasi Tertinggi (+%)</option>
+                      <option value="diffAsc">Deviasi Terendah (-%)</option>
+                      <option value="actualDesc">Harga Actual Tertinggi</option>
+                    </select>
+                  </div>
+
+                  {(evalTableSearch || evalTableCategory !== 'All' || evalTableStatus !== 'all' || evalTableSort !== 'default') && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEvalTableSearch('');
+                        setEvalTableCategory('All');
+                        setEvalTableStatus('all');
+                        setEvalTableSort('default');
+                      }}
+                      className="px-2.5 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-lg text-xs font-bold transition cursor-pointer"
+                    >
+                      Reset Filter
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Scrollable Table Container (Scroll Up-Down Hanya Pada Bagian Ini Saja) */}
+            <div className="overflow-x-auto overflow-y-auto max-h-[420px] overscroll-contain rounded-xl border border-slate-200 shadow-2xs">
+              <table className="w-full text-left text-xs whitespace-nowrap">
+                <thead className="bg-slate-800 text-white font-bold text-[11px] uppercase sticky top-0 z-10 shadow-xs">
+                  <tr>
+                    <th className="px-3 py-2.5">SKU</th>
+                    <th className="px-3 py-2.5">Nama Barang</th>
+                    <th className="px-3 py-2.5">Kategori & Unit</th>
+                    <th className="px-3 py-2.5 text-right bg-slate-700">Harga Budget (Acuan)</th>
+                    <th className="px-3 py-2.5 text-center bg-slate-700">Batas Bawah / Atas</th>
+                    <th className="px-3 py-2.5 text-right bg-emerald-900 text-emerald-100">Harga Actual (Avg Inbound)</th>
+                    <th className="px-3 py-2.5 text-right">Deviasi (Rp & %)</th>
+                    <th className="px-3 py-2.5 text-right">Inbound Value (Actual)</th>
+                    <th className="px-3 py-2.5 text-right">Outbond Value (Actual)</th>
+                    <th className="px-3 py-2.5 text-center">Status Analisis</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {(() => {
+                    const combinedSearch = (evalTableSearch.trim() || priceAnalysisSearch.trim()).toLowerCase();
+                    const effectiveStatus = evalTableStatus !== 'all' ? evalTableStatus : priceAnalysisFilter;
+
+                    const filteredInv = priceAnalysisData.itemAnalysisList
+                      .filter((row) => {
+                        const matchSearch =
+                          !combinedSearch ||
+                          row.item.sku.toLowerCase().includes(combinedSearch) ||
+                          row.item.itemName.toLowerCase().includes(combinedSearch) ||
+                          row.item.category.toLowerCase().includes(combinedSearch);
+                        const matchCat =
+                          evalTableCategory === 'All' || row.item.category === evalTableCategory;
+                        const matchFilter =
+                          effectiveStatus === 'all'
+                            ? true
+                            : effectiveStatus === 'anomaly'
+                            ? row.status !== 'normal'
+                            : row.status === effectiveStatus;
+                        return matchSearch && matchCat && matchFilter;
+                      })
+                      .sort((a, b) => {
+                        if (evalTableSort === 'diffDesc') return b.diffPct - a.diffPct;
+                        if (evalTableSort === 'diffAsc') return a.diffPct - b.diffPct;
+                        if (evalTableSort === 'actualDesc') return b.actual - a.actual;
+                        return 0;
+                      });
+
+                    if (filteredInv.length === 0) {
+                      return (
+                        <tr>
+                          <td colSpan={10} className="py-10 text-center text-slate-400">
+                            {priceAnalysisData.itemAnalysisList.length === 0
+                              ? 'Master Inventory masih kosong.'
+                              : 'Tidak ada barang Master Inventory yang sesuai dengan filter saat ini.'}
+                          </td>
+                        </tr>
+                      );
+                    }
+
+                    return filteredInv.map((row) => (
+                      <tr
+                        key={row.item.sku}
+                        className={`transition ${
+                          row.status === 'upper'
+                            ? 'bg-rose-50/60 hover:bg-rose-100/60'
+                            : row.status === 'lower'
+                            ? 'bg-amber-50/60 hover:bg-amber-100/60'
+                            : 'hover:bg-slate-50'
+                        }`}
+                      >
+                        <td className="px-3 py-2.5 font-mono font-bold text-slate-900">{row.item.sku}</td>
+                        <td className="px-3 py-2.5 font-semibold text-slate-800">{row.item.itemName}</td>
+                        <td className="px-3 py-2.5 text-slate-600">
+                          {row.item.category} ({row.item.unit})
+                        </td>
+                        <td className="px-3 py-2.5 text-right font-mono font-bold text-slate-800 bg-slate-50/60">
+                          {formatRupiah(row.budget)}
+                        </td>
+                        <td className="px-3 py-2.5 text-center font-mono text-[11px] text-slate-600 bg-slate-50/60">
+                          {formatRupiah(row.minThreshold)} – {formatRupiah(row.maxThreshold)}
+                        </td>
+                        <td className="px-3 py-2.5 text-right font-mono font-black text-emerald-900">
+                          {formatRupiah(row.actual)}
+                        </td>
+                        <td className="px-3 py-2.5 text-right font-mono font-bold">
+                          <span
+                            className={
+                              row.diffAmount > 0
+                                ? 'text-rose-600'
+                                : row.diffAmount < 0
+                                ? 'text-amber-700'
+                                : 'text-emerald-600'
+                            }
+                          >
+                            {row.diffAmount > 0 ? '+' : ''}
+                            {formatRupiah(row.diffAmount)} ({row.diffPct > 0 ? `+${row.diffPct.toFixed(1)}%` : `${row.diffPct.toFixed(1)}%`})
+                          </span>
+                        </td>
+                        <td className="px-3 py-2.5 text-right font-mono text-emerald-800">
+                          {formatRupiah(row.item.inboundValue || 0)}{' '}
+                          <span className="text-[10px] text-slate-400">({row.item.inbound} {row.item.unit})</span>
+                        </td>
+                        <td className="px-3 py-2.5 text-right font-mono text-rose-800">
+                          {formatRupiah(row.item.outbondValue || 0)}{' '}
+                          <span className="text-[10px] text-slate-400">({row.item.outbond} {row.item.unit})</span>
+                        </td>
+                        <td className="px-3 py-2.5 text-center">
+                          {row.status === 'upper' ? (
+                            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-extrabold bg-rose-100 text-rose-800 border border-rose-300">
+                              <AlertTriangle className="w-3 h-3" />
+                              Margin Atas Terlampaui
+                            </span>
+                          ) : row.status === 'lower' ? (
+                            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-extrabold bg-amber-100 text-amber-900 border border-amber-300">
+                              <AlertTriangle className="w-3 h-3" />
+                              Margin Bawah Terlampaui
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
+                              <CheckCircle2 className="w-3 h-3" />
+                              Normal
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    ));
+                  })()}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       )}
@@ -2510,6 +3305,9 @@ export const MasterInventory: React.FC = () => {
                   }
                   className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-amber-500 outline-hidden font-mono"
                 />
+                <span className="text-[10px] text-slate-400 mt-0.5 block">
+                  Digunakan untuk Beginning Value, Purchase Request, dan Purchasing & Vendor (serta acuan analisis anomali harga).
+                </span>
               </div>
 
               <div>
@@ -2529,6 +3327,9 @@ export const MasterInventory: React.FC = () => {
                   }
                   className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-amber-500 outline-hidden font-mono"
                 />
+                <span className="text-[10px] text-slate-400 mt-0.5 block">
+                  Digunakan untuk Inbound Value & Outbond Value (otomatis diakumulasi & di-average saat ada input harga di Inbound).
+                </span>
               </div>
 
               <div className="col-span-2">

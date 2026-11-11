@@ -66,6 +66,7 @@ export const InboundSection: React.FC = () => {
   // Receive Goods Modal State
   const [selectedReceivingRecord, setSelectedReceivingRecord] = useState<InboundReceivingRecord | null>(null);
   const [receivedQtyMap, setReceivedQtyMap] = useState<Record<string, number>>({});
+  const [receivedPriceMap, setReceivedPriceMap] = useState<Record<string, number>>({});
   const [receiveNotes, setReceiveNotes] = useState<string>('');
 
   // Form Inbound/Receiving yang dipilih untuk menampilkan list barang
@@ -130,8 +131,10 @@ export const InboundSection: React.FC = () => {
   const [isItemDropdownOpen, setIsItemDropdownOpen] = useState<boolean>(false);
   const searchDropdownRef = useRef<HTMLDivElement>(null);
 
-  const [manualQty, setManualQty] = useState<number>(10);
-  const [manualPrice, setManualPrice] = useState<number>(0);
+  const [manualQty, setManualQty] = useState<number | ''>(10);
+  const [manualPrice, setManualPrice] = useState<number | ''>(0);
+  const [manualIncludePPN, setManualIncludePPN] = useState<boolean>(false);
+  const [manualPPNRate, setManualPPNRate] = useState<number>(11);
   const [manualDate, setManualDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
   const [manualSourceType, setManualSourceType] = useState<'vendor' | 'other'>('vendor');
   const [manualVendorName, setManualVendorName] = useState<string>(() => vendors[0]?.namaVendor || '');
@@ -200,10 +203,17 @@ export const InboundSection: React.FC = () => {
   const handleOpenReceiveModal = (record: InboundReceivingRecord) => {
     setSelectedReceivingRecord(record);
     const initialMap: Record<string, number> = {};
+    const initialPriceMap: Record<string, number> = {};
     record.items.forEach((it) => {
       initialMap[it.sku] = it.pendingQty; // Default to receiving remaining pending qty
+      const invItem = inventory.find((inv) => inv.sku === it.sku);
+      initialPriceMap[it.sku] =
+        it.unitPrice !== undefined && it.unitPrice > 0
+          ? it.unitPrice
+          : invItem?.priceBudget ?? invItem?.price ?? 0;
     });
     setReceivedQtyMap(initialMap);
+    setReceivedPriceMap(initialPriceMap);
     setReceiveNotes('');
   };
 
@@ -214,6 +224,7 @@ export const InboundSection: React.FC = () => {
     const payload = selectedReceivingRecord.items.map((it) => ({
       sku: it.sku,
       qtyReceived: receivedQtyMap[it.sku] || 0,
+      unitPrice: receivedPriceMap[it.sku] ?? it.unitPrice,
     }));
 
     const poVendorId = selectedReceivingRecord.poVendorId;
@@ -227,7 +238,7 @@ export const InboundSection: React.FC = () => {
     // Pop-up sukses
     setSuccessModalData({
       title: 'Data Telah Berhasil Di-input!',
-      message: `Penerimaan barang dari PO ${poVendorId} (${vendorName}) telah berhasil diproses ke Inbound Gudang.`,
+      message: `Penerimaan barang dari PO ${poVendorId} (${vendorName}) telah berhasil diproses ke Inbound Gudang dan harga masuk telah diakumulasi ke Harga Actual Master Inventory.`,
       details: [
         { label: 'Nomor PO Vendor', value: poVendorId },
         { label: 'No. Surat Jalan (DO)', value: doNumber },
@@ -250,6 +261,16 @@ export const InboundSection: React.FC = () => {
       return;
     }
 
+    if (manualQty === '' || Number(manualQty) <= 0) {
+      alert('Jumlah Masuk (Qty) tidak boleh kosong dan harus lebih dari 0.');
+      return;
+    }
+
+    if (manualPrice === '' || Number(manualPrice) < 0) {
+      alert('Harga Masuk / Satuan (Rp) tidak boleh kosong.');
+      return;
+    }
+
     const finalSource =
       manualSourceType === 'vendor'
         ? `Vendor: ${manualVendorName || 'Supplier Luar'}`
@@ -257,8 +278,12 @@ export const InboundSection: React.FC = () => {
         ? manualCustomSource || 'Manual Non-Vendor'
         : manualOtherSource;
 
-    const submittedQty = manualQty;
-    const submittedPrice = manualPrice;
+    const submittedQty = Number(manualQty);
+    const basePrice = Number(manualPrice);
+    const ppnRate = manualIncludePPN ? Math.max(0, Number(manualPPNRate) || 0) : 0;
+    const ppnPerUnit = manualIncludePPN ? Math.round(basePrice * (ppnRate / 100)) : 0;
+    const submittedPrice = basePrice + ppnPerUnit;
+    const totalPPN = ppnPerUnit * submittedQty;
     const submittedTotalPrice = submittedPrice * submittedQty;
     const submittedDate = manualDate || new Date().toISOString().slice(0, 10);
 
@@ -269,6 +294,10 @@ export const InboundSection: React.FC = () => {
       qty: submittedQty,
       unit: item.unit,
       price: submittedPrice,
+      priceBeforePPN: basePrice,
+      includePPN: manualIncludePPN,
+      ppnPercentage: manualIncludePPN ? ppnRate : undefined,
+      ppnAmount: manualIncludePPN ? totalPPN : undefined,
       totalPrice: submittedTotalPrice,
       vendorName: manualSourceType === 'vendor' ? manualVendorName : undefined,
       source: finalSource,
@@ -280,14 +309,22 @@ export const InboundSection: React.FC = () => {
     // Pop-up sukses
     setSuccessModalData({
       title: 'Barang Masuk Berhasil Dicatat!',
-      message: `Barang masuk (${submittedQty} ${item.unit} ${item.itemName}) berhasil dicatat dan menambah stok Inbound di Master Inventory.`,
+      message: `Barang masuk (${submittedQty} ${item.unit} ${item.itemName}) berhasil dicatat${
+        manualIncludePPN ? ` (termasuk PPN ${ppnRate}%)` : ''
+      } dan menambah stok serta akumulasi Harga Actual di Master Inventory.`,
       details: [
         { label: 'Tanggal Masuk', value: formatDate(submittedDate) },
         { label: 'SKU Barang', value: item.sku },
         { label: 'Nama Barang', value: item.itemName },
         { label: 'Kategori', value: item.category },
         { label: 'Jumlah Masuk', value: `${submittedQty} ${item.unit}` },
-        { label: 'Harga Satuan', value: formatRupiah(submittedPrice) },
+        ...(manualIncludePPN
+          ? [
+              { label: 'Harga Dasar / Unit', value: formatRupiah(basePrice) },
+              { label: `PPN (${ppnRate}%)`, value: `${formatRupiah(ppnPerUnit)} / unit (Total PPN: ${formatRupiah(totalPPN)})` },
+              { label: 'Harga Satuan + PPN', value: formatRupiah(submittedPrice) },
+            ]
+          : [{ label: 'Harga Satuan', value: formatRupiah(submittedPrice) }]),
         { label: 'Total Nilai Masuk', value: formatRupiah(submittedTotalPrice) },
         { label: 'Sumber / Vendor', value: finalSource },
         { label: 'Petugas Penerima', value: currentUser.username },
@@ -938,8 +975,21 @@ export const InboundSection: React.FC = () => {
                       min="1"
                       required
                       value={manualQty}
-                      onChange={(e) => setManualQty(Math.max(1, parseInt(e.target.value) || 0))}
-                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg font-bold text-sm text-slate-900 focus:ring-2 focus:ring-emerald-500 outline-hidden"
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        if (raw === '') {
+                          setManualQty('');
+                        } else {
+                          const parsed = parseInt(raw, 10);
+                          setManualQty(isNaN(parsed) ? '' : Math.max(0, parsed));
+                        }
+                      }}
+                      placeholder="Masukkan Qty..."
+                      className={`w-full px-3 py-2 bg-slate-50 border rounded-lg font-bold text-sm text-slate-900 focus:ring-2 focus:ring-emerald-500 outline-hidden ${
+                        manualQty === '' || Number(manualQty) <= 0
+                          ? 'border-amber-400 bg-amber-50/30'
+                          : 'border-slate-300'
+                      }`}
                     />
                     {selectedInventoryItem && (
                       <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-500">
@@ -947,12 +997,17 @@ export const InboundSection: React.FC = () => {
                       </span>
                     )}
                   </div>
+                  {(manualQty === '' || Number(manualQty) <= 0) && (
+                    <span className="text-[10px] text-amber-700 font-semibold mt-0.5 block">
+                      * Nilai Qty wajib diisi (&gt; 0) untuk melanjutkan.
+                    </span>
+                  )}
                 </div>
 
                 {/* Input Harga */}
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1 flex items-center justify-between">
-                    <span>Harga Satuan (Rp) *</span>
+                    <span>Harga Masuk / Satuan (Rp) *</span>
                     {selectedInventoryItem?.priceBudget ? (
                       <button
                         type="button"
@@ -960,7 +1015,7 @@ export const InboundSection: React.FC = () => {
                         className="text-[10px] text-emerald-700 underline font-semibold cursor-pointer"
                         title="Gunakan harga budget dari Master Inventory"
                       >
-                        Reset Budget
+                        Acuan Budget: {formatRupiah(selectedInventoryItem.priceBudget)}
                       </button>
                     ) : null}
                   </label>
@@ -971,18 +1026,173 @@ export const InboundSection: React.FC = () => {
                       step="500"
                       required
                       value={manualPrice}
-                      onChange={(e) => setManualPrice(Math.max(0, parseInt(e.target.value) || 0))}
-                      placeholder="0"
-                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg font-bold text-sm text-emerald-800 focus:ring-2 focus:ring-emerald-500 outline-hidden"
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        if (raw === '') {
+                          setManualPrice('');
+                        } else {
+                          const parsed = parseInt(raw, 10);
+                          setManualPrice(isNaN(parsed) ? '' : Math.max(0, parsed));
+                        }
+                      }}
+                      placeholder="Masukkan harga..."
+                      className={`w-full px-3 py-2 bg-slate-50 border rounded-lg font-bold text-sm text-emerald-800 focus:ring-2 focus:ring-emerald-500 outline-hidden ${
+                        manualPrice === '' ? 'border-amber-400 bg-amber-50/30' : 'border-slate-300'
+                      }`}
                     />
                   </div>
-                  <div className="text-[10px] text-slate-500 mt-0.5 flex justify-between font-medium">
-                    <span>{formatRupiah(manualPrice)} / unit</span>
-                    <span className="font-bold text-emerald-700">
-                      Total: {formatRupiah(manualPrice * manualQty)}
+                  {manualPrice === '' ? (
+                    <span className="text-[10px] text-amber-700 font-semibold mt-0.5 block">
+                      * Nilai harga wajib diisi untuk melanjutkan.
                     </span>
-                  </div>
+                  ) : (
+                    (() => {
+                      const numQty = manualQty === '' ? 0 : Number(manualQty);
+                      const numPrice = Number(manualPrice) || 0;
+                      const ppnUnit = manualIncludePPN
+                        ? Math.round(numPrice * (Math.max(0, Number(manualPPNRate) || 0) / 100))
+                        : 0;
+                      const finalUnit = numPrice + ppnUnit;
+                      return (
+                        <div className="text-[10px] text-slate-500 mt-0.5 flex justify-between font-medium">
+                          <span>
+                            {formatRupiah(finalUnit)} / unit
+                            {manualIncludePPN ? ` (inc. PPN)` : ''}
+                          </span>
+                          <span className="font-bold text-emerald-700">
+                            Total: {formatRupiah(finalUnit * numQty)}
+                          </span>
+                        </div>
+                      );
+                    })()
+                  )}
+                  {selectedInventoryItem &&
+                    (selectedInventoryItem.priceBudget || selectedInventoryItem.price) > 0 &&
+                    manualPrice !== '' &&
+                    Number(manualPrice) > 0 &&
+                    (() => {
+                      const refBudget = selectedInventoryItem.priceBudget || selectedInventoryItem.price;
+                      const numPrice = Number(manualPrice) || 0;
+                      const ppnUnit = manualIncludePPN
+                        ? Math.round(numPrice * (Math.max(0, Number(manualPPNRate) || 0) / 100))
+                        : 0;
+                      const effectivePrice = numPrice + ppnUnit;
+                      const diffPct = ((effectivePrice - refBudget) / refBudget) * 100;
+                      const isOverMargin = diffPct > 15;
+                      const isUnderMargin = diffPct < -15;
+                      return (
+                        <div
+                          className={`mt-1.5 px-2.5 py-1 rounded-lg border text-[10px] font-bold flex items-center justify-between ${
+                            isOverMargin
+                              ? 'bg-rose-50 text-rose-800 border-rose-200'
+                              : isUnderMargin
+                              ? 'bg-amber-50 text-amber-800 border-amber-200'
+                              : 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                          }`}
+                        >
+                          <span className="flex items-center gap-1">
+                            {(isOverMargin || isUnderMargin) && <AlertTriangle className="w-3 h-3 shrink-0" />}
+                            {isOverMargin
+                              ? 'Anomali Margin Atas (> +15% Budget)'
+                              : isUnderMargin
+                              ? 'Anomali Margin Bawah (< -15% Budget)'
+                              : 'Normal (Dalam Rentang Budget)'}
+                          </span>
+                          <span className="font-mono">
+                            {diffPct > 0 ? `+${diffPct.toFixed(1)}%` : `${diffPct.toFixed(1)}%`}
+                          </span>
+                        </div>
+                      );
+                    })()}
                 </div>
+              </div>
+
+              {/* Pilihan Tambah PPN pada Incoming Goods */}
+              <div
+                className={`p-3 rounded-xl border transition ${
+                  manualIncludePPN
+                    ? 'bg-emerald-50/70 border-emerald-300'
+                    : 'bg-slate-50/70 border-slate-200'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <label className="flex items-center gap-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={manualIncludePPN}
+                      onChange={(e) => setManualIncludePPN(e.target.checked)}
+                      className="w-4 h-4 rounded text-emerald-600 focus:ring-emerald-500 cursor-pointer"
+                    />
+                    <span className="font-bold text-slate-800 text-xs">
+                      Tambahkan PPN pada Harga Barang Masuk
+                    </span>
+                  </label>
+
+                  {manualIncludePPN && (
+                    <div className="flex items-center gap-1.5">
+                      {[11, 12].map((rate) => (
+                        <button
+                          key={rate}
+                          type="button"
+                          onClick={() => setManualPPNRate(rate)}
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold transition cursor-pointer ${
+                            manualPPNRate === rate
+                              ? 'bg-emerald-600 text-white'
+                              : 'bg-white text-slate-600 border border-slate-300 hover:bg-slate-100'
+                          }`}
+                        >
+                          PPN {rate}%
+                        </button>
+                      ))}
+                      <div className="flex items-center gap-1 bg-white border border-emerald-300 rounded px-1.5 py-0.5">
+                        <input
+                          type="number"
+                          min="0"
+                          max="100"
+                          step="0.5"
+                          value={manualPPNRate}
+                          onChange={(e) => setManualPPNRate(Math.max(0, parseFloat(e.target.value) || 0))}
+                          className="w-10 text-right font-mono font-bold text-[11px] text-emerald-800 outline-hidden"
+                        />
+                        <span className="text-[10px] font-bold text-slate-500">%</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {manualIncludePPN && manualPrice !== '' && manualQty !== '' && Number(manualQty) > 0 && (() => {
+                  const baseP = Number(manualPrice) || 0;
+                  const q = Number(manualQty) || 0;
+                  const rate = Math.max(0, Number(manualPPNRate) || 0);
+                  const ppnPerItem = Math.round(baseP * (rate / 100));
+                  const unitWithPPN = baseP + ppnPerItem;
+                  const totalPPN = ppnPerItem * q;
+                  const grandTotal = unitWithPPN * q;
+                  return (
+                    <div className="mt-2 pt-2 border-t border-emerald-200/80 grid grid-cols-2 sm:grid-cols-3 gap-2 text-[11px]">
+                      <div>
+                        <span className="text-slate-500 block text-[10px]">Harga Dasar / Unit:</span>
+                        <span className="font-mono font-semibold text-slate-700">{formatRupiah(baseP)}</span>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 block text-[10px]">PPN ({rate}%) / Unit:</span>
+                        <span className="font-mono font-bold text-amber-700">+{formatRupiah(ppnPerItem)}</span>
+                      </div>
+                      <div className="col-span-2 sm:col-span-1">
+                        <span className="text-slate-500 block text-[10px]">Harga + PPN (Masuk Actual):</span>
+                        <span className="font-mono font-extrabold text-emerald-800">{formatRupiah(unitWithPPN)}</span>
+                      </div>
+                      <div className="col-span-2 sm:col-span-3 flex items-center justify-between bg-white/80 px-2.5 py-1 rounded-lg border border-emerald-200">
+                        <span className="text-[10px] font-semibold text-slate-600">
+                          Total PPN ({q} {selectedInventoryItem?.unit || 'unit'}): <strong>{formatRupiah(totalPPN)}</strong>
+                        </span>
+                        <span className="text-[11px] font-extrabold text-emerald-900 font-mono">
+                          Grand Total: {formatRupiah(grandTotal)}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
 
               {/* Pilihan Sumber / Vendor Masuk */}
@@ -1086,7 +1296,13 @@ export const InboundSection: React.FC = () => {
 
               <button
                 type="submit"
-                disabled={!selectedInventoryItem}
+                disabled={
+                  !selectedInventoryItem ||
+                  manualQty === '' ||
+                  Number(manualQty) <= 0 ||
+                  manualPrice === '' ||
+                  Number(manualPrice) < 0
+                }
                 className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-bold rounded-xl transition shadow-xs flex items-center justify-center gap-1.5 mt-2 cursor-pointer"
               >
                 <PlusCircle className="w-4 h-4" />
@@ -1145,7 +1361,12 @@ export const InboundSection: React.FC = () => {
                           +{m.qty} {m.unit}
                         </td>
                         <td className="px-3 py-2 text-right text-slate-700 font-medium whitespace-nowrap">
-                          {m.price ? formatRupiah(m.price) : '-'}
+                          <div>{m.price ? formatRupiah(m.price) : '-'}</div>
+                          {m.includePPN && (
+                            <span className="inline-block text-[9px] font-bold bg-emerald-100 text-emerald-800 px-1.5 py-0.2 rounded border border-emerald-200">
+                              Termasuk PPN {m.ppnPercentage ?? 11}%
+                            </span>
+                          )}
                         </td>
                         <td className="px-3 py-2 text-right font-bold text-emerald-800 whitespace-nowrap">
                           {m.totalPrice ? formatRupiah(m.totalPrice) : m.price ? formatRupiah(m.price * m.qty) : '-'}
@@ -1754,45 +1975,109 @@ export const InboundSection: React.FC = () => {
             </div>
 
             <p className="text-xs text-slate-600">
-              Masukkan jumlah fisik barang yang sampai di gudang. Masukkan angka sesuai Surat Jalan (DO) pengantar.
+              Masukkan jumlah fisik dan harga satuan barang masuk sesuai Surat Jalan / Faktur. Harga yang di-input pada Inbound akan diakumulasi dan di-average otomatis pada <strong>Harga Actual</strong> di Master Inventory.
             </p>
 
             <div className="space-y-3 overflow-y-auto flex-1 pr-1">
-              {selectedReceivingRecord.items.map((it) => (
-                <div
-                  key={it.sku}
-                  className="p-3 rounded-xl border border-slate-200 bg-slate-50/50 flex items-center justify-between gap-3 text-xs"
-                >
-                  <div className="flex-1">
-                    <div className="font-bold text-slate-900">{it.itemName}</div>
-                    <div className="text-[11px] text-slate-500">
-                      SKU: {it.sku} • Dipesan: {it.orderedQty} {it.unit} (Sudah masuk: {it.receivedQty})
-                    </div>
-                  </div>
+              {selectedReceivingRecord.items.map((it) => {
+                const invItem = inventory.find((inv) => inv.sku === it.sku);
+                const budgetPrice = invItem?.priceBudget ?? invItem?.price ?? it.unitPrice ?? 0;
+                const currentInputPrice = receivedPriceMap[it.sku] ?? it.unitPrice ?? budgetPrice;
+                const diffPct = budgetPrice > 0 ? ((currentInputPrice - budgetPrice) / budgetPrice) * 100 : 0;
+                const isOverMargin = budgetPrice > 0 && diffPct > 15;
+                const isUnderMargin = budgetPrice > 0 && diffPct < -15;
 
-                  <div className="w-36">
-                    <label className="block text-[10px] font-bold text-slate-500 mb-0.5">
-                      Qty Diterima Saat Ini:
-                    </label>
-                    <div className="flex items-center gap-1">
-                      <input
-                        type="number"
-                        min="0"
-                        max={it.pendingQty}
-                        value={receivedQtyMap[it.sku] ?? it.pendingQty}
-                        onChange={(e) =>
-                          setReceivedQtyMap({
-                            ...receivedQtyMap,
-                            [it.sku]: Math.max(0, parseInt(e.target.value) || 0),
-                          })
-                        }
-                        className="w-full px-2 py-1 bg-white border border-slate-300 rounded-lg font-bold text-center text-xs focus:ring-2 focus:ring-emerald-500 outline-hidden"
-                      />
-                      <span className="text-slate-500 text-[11px]">{it.unit}</span>
+                return (
+                  <div
+                    key={it.sku}
+                    className={`p-3 rounded-xl border space-y-2 text-xs ${
+                      isOverMargin
+                        ? 'border-rose-300 bg-rose-50/40'
+                        : isUnderMargin
+                        ? 'border-amber-300 bg-amber-50/40'
+                        : 'border-slate-200 bg-slate-50/50'
+                    }`}
+                  >
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="flex-1">
+                        <div className="font-bold text-slate-900">{it.itemName}</div>
+                        <div className="text-[11px] text-slate-500">
+                          SKU: {it.sku} • Dipesan: {it.orderedQty} {it.unit} (Sudah masuk: {it.receivedQty})
+                        </div>
+                        <div className="text-[10px] text-slate-500 mt-0.5 flex items-center gap-2 flex-wrap">
+                          <span>Acuan Budget: <strong>{formatRupiah(budgetPrice)}</strong></span>
+                          {invItem?.priceActual !== undefined && invItem.priceActual > 0 && (
+                            <span>• Actual Saat Ini: <strong>{formatRupiah(invItem.priceActual)}</strong></span>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <div className="w-28">
+                          <label className="block text-[10px] font-bold text-slate-500 mb-0.5">
+                            Qty Diterima:
+                          </label>
+                          <div className="flex items-center gap-1">
+                            <input
+                              type="number"
+                              min="0"
+                              max={it.pendingQty}
+                              value={receivedQtyMap[it.sku] ?? it.pendingQty}
+                              onChange={(e) =>
+                                setReceivedQtyMap({
+                                  ...receivedQtyMap,
+                                  [it.sku]: Math.max(0, parseInt(e.target.value) || 0),
+                                })
+                              }
+                              className="w-full px-2 py-1 bg-white border border-slate-300 rounded-lg font-bold text-center text-xs focus:ring-2 focus:ring-emerald-500 outline-hidden"
+                            />
+                            <span className="text-slate-500 text-[11px]">{it.unit}</span>
+                          </div>
+                        </div>
+
+                        <div className="w-36">
+                          <label className="block text-[10px] font-bold text-slate-500 mb-0.5">
+                            Harga Masuk / Unit (Rp):
+                          </label>
+                          <input
+                            type="number"
+                            min="0"
+                            step="500"
+                            value={currentInputPrice}
+                            onChange={(e) =>
+                              setReceivedPriceMap({
+                                ...receivedPriceMap,
+                                [it.sku]: Math.max(0, parseInt(e.target.value) || 0),
+                              })
+                            }
+                            className="w-full px-2 py-1 bg-white border border-slate-300 rounded-lg font-bold text-right text-xs text-emerald-800 focus:ring-2 focus:ring-emerald-500 outline-hidden"
+                          />
+                        </div>
+                      </div>
                     </div>
+
+                    {(isOverMargin || isUnderMargin) && (
+                      <div
+                        className={`px-2.5 py-1 rounded-lg text-[10px] font-bold flex items-center justify-between ${
+                          isOverMargin
+                            ? 'bg-rose-100/80 text-rose-800 border border-rose-200'
+                            : 'bg-amber-100/80 text-amber-800 border border-amber-200'
+                        }`}
+                      >
+                        <span className="flex items-center gap-1">
+                          <AlertTriangle className="w-3 h-3 shrink-0" />
+                          {isOverMargin
+                            ? `Anomali Margin Atas: Harga input di atas Harga Budget (${formatRupiah(budgetPrice)})`
+                            : `Anomali Margin Bawah: Harga input jauh di bawah Harga Budget (${formatRupiah(budgetPrice)})`}
+                        </span>
+                        <span className="font-mono">
+                          {diffPct > 0 ? `+${diffPct.toFixed(1)}%` : `${diffPct.toFixed(1)}%`}
+                        </span>
+                      </div>
+                    )}
                   </div>
-                </div>
-              ))}
+                );
+              })}
 
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
