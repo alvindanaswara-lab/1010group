@@ -53,6 +53,7 @@ export const PurchaseRequestSection: React.FC = () => {
     outletOrders,
     createOutletOrder,
     bulkImportOutletOrders,
+    confirmPendingSave,
     generatePO,
     purchaseOrders,
     updatePO,
@@ -259,10 +260,11 @@ export const PurchaseRequestSection: React.FC = () => {
     }
   };
 
-  const handleConfirmUploadPR = () => {
+  const handleConfirmUploadPR = async () => {
     if (!uploadPRParseResult || uploadPRParseResult.orders.length === 0) return;
 
     bulkImportOutletOrders(uploadPRParseResult.orders, uploadPROverwrite);
+    try { await confirmPendingSave(); } catch { return; }
     if (uploadPRParseResult.orders[0]?.id) {
       setExpandedPROrderId(uploadPRParseResult.orders[0].id);
     }
@@ -318,7 +320,7 @@ export const PurchaseRequestSection: React.FC = () => {
   };
 
   // Execute Generate PO
-  const handleGeneratePO = () => {
+  const handleGeneratePO = async () => {
     if (selectedOrderIds.length === 0) {
       setGenerateMsg({
         type: 'error',
@@ -330,6 +332,7 @@ export const PurchaseRequestSection: React.FC = () => {
     const count = selectedOrderIds.length;
     const res = generatePO(selectedOrderIds);
     if (res.success) {
+      try { await confirmPendingSave(); } catch { return; }
       setSelectedOrderIds([]);
       setActiveSubTab('purchase-order');
 
@@ -604,7 +607,7 @@ export const PurchaseRequestSection: React.FC = () => {
           qty: bd.qty,
           unit: unitStr,
           total: bd.qty * it.price,
-          place: `${bd.outletName} (${bd.qty} ${unitStr})`,
+          place: `${bd.outletName} / ${bd.department} (${bd.qty} ${unitStr})`,
           isMerged: false,
           outletBreakdowns: [bd],
           outletBreakdownText: `${bd.outletName}: ${bd.qty} ${unitStr}`,
@@ -624,7 +627,7 @@ export const PurchaseRequestSection: React.FC = () => {
       if (parts.length > 1) {
         return parts.map((part) => {
           const [outletPart, qtyPart] = part.split(':').map((s) => s.trim());
-          const parsedQty = qtyPart ? parseInt(qtyPart, 10) || it.qty : it.qty;
+          const parsedQty = qtyPart ? Number(qtyPart) || it.qty : it.qty;
           const oName = outletPart || 'Outlet';
           return {
             ...it,
@@ -2200,11 +2203,11 @@ export const PurchaseRequestSection: React.FC = () => {
                                                   ) : (
                                                     <div className="flex items-center justify-center">
                                                       <input
-                                                        type="number"
+                                                        type="number" step="0.001"
                                                         min="0"
                                                         value={it.qty === 0 ? '' : it.qty}
                                                         onChange={(e) => {
-                                                          const val = e.target.value === '' ? 0 : Math.max(0, parseInt(e.target.value) || 0);
+                                                          const val = e.target.value === '' ? 0 : Math.max(0, Number(e.target.value) || 0);
                                                           handleDirectUpdatePOItemQty(po.id, it.sku, it.place, val);
                                                         }}
                                                         placeholder="0"
@@ -2488,11 +2491,11 @@ export const PurchaseRequestSection: React.FC = () => {
                 <label className="block font-semibold text-slate-700 mb-1">Jumlah (Qty)</label>
                 <div className="relative">
                   <input
-                    type="number"
-                    min="1"
+                    type="number" step="0.001"
+                    min="0.001"
                     required
                     value={newItemQty}
-                    onChange={(e) => setNewItemQty(Math.max(1, parseInt(e.target.value) || 1))}
+                    onChange={(e) => setNewItemQty(Math.max(0.001, Number(e.target.value) || 0.001))}
                     className="w-full px-3 py-2 border border-slate-300 rounded-lg font-bold text-sm focus:ring-2 focus:ring-amber-500 outline-hidden"
                   />
                   {newItemUnit && (
@@ -2564,10 +2567,10 @@ export const PurchaseRequestSection: React.FC = () => {
                   Qty ({editingPOItem.unit})
                 </label>
                 <input
-                  type="number"
-                  min="1"
+                  type="number" step="0.001"
+                  min="0.001"
                   value={editItemQty}
-                  onChange={(e) => setEditItemQty(Math.max(1, parseInt(e.target.value) || 1))}
+                  onChange={(e) => setEditItemQty(Math.max(0.001, Number(e.target.value) || 0.001))}
                   className="w-full text-center py-2 border border-slate-300 rounded-lg font-bold text-sm focus:ring-2 focus:ring-amber-500 outline-hidden"
                 />
               </div>

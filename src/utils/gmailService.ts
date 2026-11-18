@@ -1,4 +1,4 @@
-import { initializeApp, getApps, getApp } from 'firebase/app';
+import { initializeApp, getApps } from 'firebase/app';
 import {
   getAuth,
   signInWithPopup,
@@ -6,30 +6,21 @@ import {
   onAuthStateChanged,
   User,
 } from 'firebase/auth';
-import firebaseConfig from '../../firebase-applet-config.json';
 
-export const SCOPES = [
-  'https://mail.google.com/',
-  'https://www.googleapis.com/auth/gmail.addons.current.action.compose',
-  'https://www.googleapis.com/auth/gmail.addons.current.message.action',
-  'https://www.googleapis.com/auth/gmail.addons.current.message.metadata',
-  'https://www.googleapis.com/auth/gmail.addons.current.message.readonly',
-  'https://www.googleapis.com/auth/gmail.compose',
-  'https://www.googleapis.com/auth/gmail.insert',
-  'https://www.googleapis.com/auth/gmail.labels',
-  'https://www.googleapis.com/auth/gmail.metadata',
+
+const SCOPES = [
   'https://www.googleapis.com/auth/gmail.modify',
-  'https://www.googleapis.com/auth/gmail.readonly',
-  'https://www.googleapis.com/auth/gmail.send',
-  'https://www.googleapis.com/auth/gmail.settings.basic',
-  'https://www.googleapis.com/auth/gmail.settings.sharing',
 ];
 
-const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
-const auth = getAuth(app);
-
-const provider = new GoogleAuthProvider();
-SCOPES.forEach((scope) => provider.addScope(scope));
+function gmailAuth() {
+  const apiKey = import.meta.env.VITE_GMAIL_FIREBASE_API_KEY;
+  const authDomain = import.meta.env.VITE_GMAIL_FIREBASE_AUTH_DOMAIN;
+  const projectId = import.meta.env.VITE_GMAIL_FIREBASE_PROJECT_ID;
+  if (!apiKey || !authDomain || !projectId) return null;
+  const app = getApps().find((app) => app.name === 'gmail-vendor') ??
+    initializeApp({ apiKey, authDomain, projectId }, 'gmail-vendor');
+  return getAuth(app);
+}
 
 // Flag to indicate if we are in the middle of a sign-in flow.
 let isSigningIn = false;
@@ -40,6 +31,8 @@ export const initAuth = (
   onAuthSuccess?: (user: User, token: string) => void,
   onAuthFailure?: () => void
 ) => {
+  const auth = gmailAuth();
+  if (!auth) { onAuthFailure?.(); return () => {}; }
   return onAuthStateChanged(auth, async (user: User | null) => {
     if (user) {
       if (cachedAccessToken) {
@@ -57,6 +50,10 @@ export const initAuth = (
 
 export const googleSignIn = async (): Promise<{ user: User; accessToken: string } | null> => {
   try {
+    const auth = gmailAuth();
+    if (!auth) throw new Error('Integrasi Gmail belum dikonfigurasi.');
+    const provider = new GoogleAuthProvider();
+    SCOPES.forEach((scope) => provider.addScope(scope));
     isSigningIn = true;
     const result = await signInWithPopup(auth, provider);
     const credential = GoogleAuthProvider.credentialFromResult(result);
@@ -79,11 +76,11 @@ export const getAccessToken = async (): Promise<string | null> => {
 };
 
 export const getCurrentGoogleUser = (): User | null => {
-  return auth.currentUser;
+  return gmailAuth()?.currentUser ?? null;
 };
 
 export const logoutGoogle = async () => {
-  await auth.signOut();
+  await gmailAuth()?.signOut();
   cachedAccessToken = null;
 };
 
@@ -102,6 +99,7 @@ export interface GmailMessageSummary {
 export interface SendGmailOptions {
   to: string;
   cc?: string;
+  deliveryAttemptId?: string;
   subject: string;
   body: string;
   attachment?: {
@@ -133,7 +131,16 @@ function encodeMimeHeader(text: string): string {
   return `=?UTF-8?B?${btoa(binary)}?=`;
 }
 
+function vendorMessageId(attemptId: string): string {
+  if (!/^[0-9a-f-]{36}$/i.test(attemptId)) throw new Error('ID pengiriman tidak valid.');
+  return 'warehouse-' + attemptId + '@warehouse.1010group.invalid';
+}
+
 function buildRawMimeMessage(options: SendGmailOptions): string {
+  if ([options.to, options.cc, options.subject, options.attachment?.fileName].some(
+    (value) => value && /[\r\n]/.test(value)
+  )) throw new Error('Format alamat, subjek, atau nama lampiran tidak valid.');
+
   const boundary = `boundary_1010group_${Date.now().toString(16)}`;
   const headers: string[] = [
     `To: ${options.to.trim()}`,
@@ -142,6 +149,7 @@ function buildRawMimeMessage(options: SendGmailOptions): string {
     headers.push(`Cc: ${options.cc.trim()}`);
   }
   headers.push(`Subject: ${encodeMimeHeader(options.subject)}`);
+  if (options.deliveryAttemptId) headers.push('Message-ID: <' + vendorMessageId(options.deliveryAttemptId) + '>');
   headers.push('MIME-Version: 1.0');
 
   if (options.attachment && options.attachment.base64Data) {
@@ -174,6 +182,26 @@ function buildRawMimeMessage(options: SendGmailOptions): string {
   }
 }
 
+export class GmailDeliveryError extends Error {
+  constructor(message: string, readonly retryable: boolean) { super(message); }
+}
+
+export async function findSentVendorEmail(attemptId: string): Promise<string | null> {
+  const token = await getAccessToken();
+  if (!token) throw new Error('Hubungkan akun Gmail yang digunakan untuk mengirim.');
+  const url = new URL('https://gmail.googleapis.com/gmail/v1/users/me/messages');
+  url.searchParams.set('q', 'in:sent rfc822msgid:' + vendorMessageId(attemptId));
+  url.searchParams.set('maxResults', '2');
+  const response = await fetch(url, {
+    headers: { Authorization: 'Bearer ' + token }, signal: AbortSignal.timeout(15000),
+  });
+  if (!response.ok) throw new Error('Tidak dapat memeriksa folder Terkirim.');
+  const { messages } = await response.json() as { messages?: { id: string }[] };
+  if (messages?.length === 1) return messages[0].id;
+  if (messages && messages.length > 1) throw new Error('Lebih dari satu pesan ditemukan. Periksa folder Terkirim.');
+  return null;
+}
+
 export async function sendGmailMessage(
   options: SendGmailOptions
 ): Promise<{ id: string; threadId: string }> {
@@ -190,12 +218,14 @@ export async function sendGmailMessage(
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({ raw }),
+    signal: AbortSignal.timeout(30000),
   });
 
   if (!res.ok) {
     const errData = await res.json().catch(() => ({}));
-    throw new Error(
-      errData?.error?.message || `Gagal mengirim email melalui Gmail API (HTTP ${res.status})`
+    throw new GmailDeliveryError(
+      errData?.error?.message || 'Gmail menolak pengiriman (HTTP ' + res.status + ').',
+      [400, 401, 403, 404, 429].includes(res.status),
     );
   }
 
@@ -217,15 +247,15 @@ export async function createGmailDraft(
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      message: { raw },
-    }),
+    body: JSON.stringify({ message: { raw } }),
+    signal: AbortSignal.timeout(30000),
   });
 
   if (!res.ok) {
     const errData = await res.json().catch(() => ({}));
-    throw new Error(
-      errData?.error?.message || `Gagal menyimpan draf Gmail (HTTP ${res.status})`
+    throw new GmailDeliveryError(
+      errData?.error?.message || `Gagal menyimpan draf Gmail (HTTP ${res.status})`,
+      [400, 401, 403, 404, 429].includes(res.status),
     );
   }
 

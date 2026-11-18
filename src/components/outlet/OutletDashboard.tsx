@@ -624,11 +624,11 @@ export const OutletDashboard: React.FC<OutletDashboardProps> = ({
                                             {isOrderEditable ? (
                                               <div className="flex items-center justify-center">
                                                 <input
-                                                  type="number"
+                                                  type="number" step="0.001"
                                                   min="0"
                                                   value={it.qty === 0 ? '' : it.qty}
                                                   onChange={(e) => {
-                                                    const val = e.target.value === '' ? 0 : Math.max(0, parseInt(e.target.value) || 0);
+                                                    const val = e.target.value === '' ? 0 : Math.max(0, Number(e.target.value) || 0);
                                                     updateOrderItem(order.id, {
                                                       ...it,
                                                       qty: val,

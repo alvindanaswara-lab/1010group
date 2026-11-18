@@ -1,3 +1,4 @@
+import { jakartaDate } from '../../utils/inventoryUtils';
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { useApp } from '../../context/AppContext';
 import { OutletOrder, OrderItem, ManualOutbondRecord, DEPARTMENTS, InventoryItem, ITEM_CATEGORIES, ItemCategory } from '../../types';
@@ -59,6 +60,7 @@ export const OutbondSection: React.FC = () => {
     generateDeploymentPO,
     approveShipmentToPOTerkirim,
     finalApproveToOutbond,
+    confirmPendingSave,
     updateOrderItem,
     addOrderItem,
     deleteOrderItem,
@@ -258,7 +260,7 @@ export const OutbondSection: React.FC = () => {
   const [isOutcomingDropdownOpen, setIsOutcomingDropdownOpen] = useState<boolean>(false);
   const outcomingDropdownRef = useRef<HTMLDivElement>(null);
 
-  const [manualDate, setManualDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [manualDate, setManualDate] = useState<string>(() => jakartaDate());
   const [manualOutlet, setManualOutlet] = useState<string>(() => outlets[0]?.namaOutlet || 'Resto Senopati');
   const [manualDepartment, setManualDepartment] = useState<string>('Kitchen');
   const [manualQty, setManualQty] = useState<number>(5);
@@ -303,7 +305,7 @@ export const OutbondSection: React.FC = () => {
   });
 
   // 1. Generate Deployment PO -> Status: 'Siap Dikirim' (Mendukung Pengiriman Sebagian)
-  const handleGenerateDeployment = (order: OutletOrder, forceFullShipment: boolean = false) => {
+  const handleGenerateDeployment = async (order: OutletOrder, forceFullShipment: boolean = false) => {
     const totalItems = order.items.length;
     const preparedItems = order.items.filter((it) => (it.qtyPrepared || 0) > 0);
 
@@ -318,6 +320,7 @@ export const OutbondSection: React.FC = () => {
       return;
     }
 
+    try { await confirmPendingSave(); } catch { return; }
     setActiveDeploymentOrder(null);
 
     if (res.isPartial) {
@@ -355,7 +358,7 @@ export const OutbondSection: React.FC = () => {
   };
 
   // 2. Persetujuan Pertama: Status 'Siap Dikirim' -> 'PO Terkirim' (Hanya Administrator)
-  const handleApproveToPOTerkirim = (order: OutletOrder) => {
+  const handleApproveToPOTerkirim = async (order: OutletOrder) => {
     if (!isAdmin) {
       return;
     }
@@ -363,6 +366,7 @@ export const OutbondSection: React.FC = () => {
     if (res && !res.success) {
       return;
     }
+    try { await confirmPendingSave(); } catch { return; }
     setApprovedInSiapDikirimIds((prev) => (prev.includes(order.id) ? prev : [...prev, order.id]));
     setExpandedOrderId(order.id);
     setReviewShipmentOrder(null);
@@ -381,7 +385,7 @@ export const OutbondSection: React.FC = () => {
         { label: 'Department', value: order.department },
         { label: 'Status Baru', value: 'PO Terkirim (Disetujui Administrator)' },
         { label: 'Ditinjau & Disetujui Oleh', value: `${currentUser.username} (${currentUser.position})` },
-        { label: 'Tanggal Persetujuan', value: formatDate(new Date().toISOString().slice(0, 10)) },
+        { label: 'Tanggal Persetujuan', value: formatDate(jakartaDate()) },
       ],
       onExportPDF: () => exportSuratJalanToPDF(approvedOrderSnapshot, masterInventoryList),
       exportPDFText: 'Export to PDF (Surat Jalan)',
@@ -391,8 +395,10 @@ export const OutbondSection: React.FC = () => {
   };
 
   // 3. Persetujuan Kedua (Akhir): Status 'PO Terkirim' -> Selesai & Masuk Outbond (Stok Terpotong)
-  const handleFinalApproveToOutbond = (order: OutletOrder) => {
-    finalApproveToOutbond(order.id);
+  const handleFinalApproveToOutbond = async (order: OutletOrder) => {
+    const result = finalApproveToOutbond(order.id);
+    if (!result.success) { alert(result.message); return; }
+    try { await confirmPendingSave(); } catch { return; }
     setFinalApproveOrder(null);
 
     setSuccessModalData({
@@ -404,7 +410,6 @@ export const OutbondSection: React.FC = () => {
         { label: 'Department', value: order.department },
         { label: 'Status Akhir', value: 'Selesai (Outbond)' },
         { label: 'Total Barang Keluar', value: `${order.items.length} jenis barang` },
-        { label: 'Total Nilai Outbond', value: formatRupiah(order.totalAmount) },
         { label: 'Penyetuju Akhir', value: currentUser.username },
       ],
     });
@@ -515,7 +520,7 @@ export const OutbondSection: React.FC = () => {
           { label: 'Jumlah Form Dihapus', value: `${count} formulir` },
           { label: 'Outlet Terkait', value: outletsList },
           { label: 'Dihapus Oleh', value: `${currentUser.username} (${currentUser.position})` },
-          { label: 'Waktu Penghapusan', value: formatDate(new Date().toISOString().slice(0, 10)) },
+          { label: 'Waktu Penghapusan', value: formatDate(jakartaDate()) },
         ],
       });
       setShowSuccessModal(true);
@@ -555,7 +560,7 @@ export const OutbondSection: React.FC = () => {
         { label: 'Jumlah Item', value: `${deletedItemsCount} jenis barang` },
         { label: 'Total Nilai Form', value: formatRupiah(deletedAmount) },
         { label: 'Dihapus Oleh', value: `${currentUser.username} (${currentUser.position})` },
-        { label: 'Waktu Penghapusan', value: formatDate(new Date().toISOString().slice(0, 10)) },
+        { label: 'Waktu Penghapusan', value: formatDate(jakartaDate()) },
       ],
     });
     setShowSuccessModal(true);
@@ -765,7 +770,7 @@ export const OutbondSection: React.FC = () => {
   };
 
   // Manual Outcoming Goods submit
-  const handleManualOutbondSubmit = (e: React.FormEvent) => {
+  const handleManualOutbondSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const item = inventory.find((i) => i.sku === manualSku);
     if (!item) {
@@ -774,7 +779,7 @@ export const OutbondSection: React.FC = () => {
     }
 
     const submittedQty = manualQty;
-    const submittedDate = manualDate || new Date().toISOString().slice(0, 10);
+    const submittedDate = manualDate || jakartaDate();
     const submittedOutlet = manualOutlet;
     const submittedDept = manualDepartment;
     const submittedReason = manualDestination;
@@ -782,7 +787,7 @@ export const OutbondSection: React.FC = () => {
 
     const fullDestination = `${submittedOutlet} • ${submittedDept} (${submittedReason})`;
 
-    addManualOutbond({
+    const posted = addManualOutbond({
       sku: item.sku,
       itemName: item.itemName,
       category: item.category,
@@ -795,6 +800,8 @@ export const OutbondSection: React.FC = () => {
       dispatchedBy: currentUser.username,
       notes: submittedNotes,
     });
+    if (!posted.success) { alert(posted.message); return; }
+    try { await confirmPendingSave(); } catch { return; }
 
     // Pop-up sukses manual outbond
     setSuccessModalData({
@@ -1711,10 +1718,10 @@ export const OutbondSection: React.FC = () => {
                           <div className="flex sm:flex-col items-center sm:items-end justify-between gap-2 shrink-0">
                             <div className="text-left sm:text-right">
                               <span className="text-[10px] uppercase tracking-wider font-bold text-slate-400 block">
-                                Total Nilai Form
+                                {activePreviewDeployOrder.postedStockCost === undefined ? 'Estimasi Form' : 'Biaya Stok Keluar'}
                               </span>
                               <span className="text-base font-black text-slate-900">
-                                {formatRupiah(activePreviewDeployOrder.totalAmount)}
+                                {formatRupiah(activePreviewDeployOrder.postedStockCost ?? activePreviewDeployOrder.totalAmount)}
                               </span>
                             </div>
 
@@ -1901,12 +1908,10 @@ export const OutbondSection: React.FC = () => {
                                   const resolvedSku = matchedInv ? matchedInv.sku : it.sku;
                                   const resolvedName = it.itemName || matchedInv?.itemName || it.sku;
                                   const resolvedCategory = matchedInv ? matchedInv.category : it.category;
-                                  const resolvedPrice = matchedInv
-                                    ? matchedInv.priceActual !== undefined && matchedInv.priceActual > 0
-                                      ? matchedInv.priceActual
-                                      : matchedInv.priceBudget ?? matchedInv.price ?? it.price
-                                    : it.price;
-                                  const resolvedSubtotal = it.qty * resolvedPrice;
+                                  const posted = activePreviewDeployOrder.postedStockCosts;
+                                  const shippedQty = it.qtyPrepared ?? it.qty;
+                                  const resolvedSubtotal = posted ? posted[String(idx + 1)] ?? 0 : it.subtotal;
+                                  const resolvedPrice = posted && shippedQty > 0 ? resolvedSubtotal / shippedQty : posted ? 0 : it.price;
                                   const isFulfilled = (it.qtyPrepared || 0) >= it.qty;
                                   const isPartial = (it.qtyPrepared || 0) > 0 && (it.qtyPrepared || 0) < it.qty;
                                   return (
@@ -1968,10 +1973,10 @@ export const OutbondSection: React.FC = () => {
                               <tfoot className="bg-slate-50 border-t border-slate-200 font-bold text-xs sticky bottom-0 z-10">
                                 <tr>
                                   <td colSpan={9} className="px-3 py-2.5 text-right text-slate-600 bg-slate-50">
-                                    Total Nilai Form Deployment:
+                                    {activePreviewDeployOrder.postedStockCost === undefined ? 'Total Estimasi Form' : 'Total Biaya Stok Keluar'}
                                   </td>
                                   <td className="px-3 py-2.5 text-right text-rose-700 font-black bg-slate-50">
-                                    {formatRupiah(activePreviewDeployOrder.totalAmount)}
+                                    {formatRupiah(activePreviewDeployOrder.postedStockCost ?? activePreviewDeployOrder.totalAmount)}
                                   </td>
                                 </tr>
                               </tfoot>
@@ -2026,7 +2031,7 @@ export const OutbondSection: React.FC = () => {
                   <div className="flex items-center gap-1 text-[10px]">
                     <button
                       type="button"
-                      onClick={() => setManualDate(new Date().toISOString().slice(0, 10))}
+                      onClick={() => setManualDate(jakartaDate())}
                       className="px-2 py-0.5 bg-slate-100 hover:bg-rose-50 hover:text-rose-700 text-slate-600 rounded font-semibold cursor-pointer"
                     >
                       Hari Ini
@@ -2202,11 +2207,11 @@ export const OutbondSection: React.FC = () => {
                 </label>
                 <div className="relative">
                   <input
-                    type="number"
-                    min="1"
+                    type="number" step="0.001"
+                    min="0.001"
                     required
                     value={manualQty}
-                    onChange={(e) => setManualQty(Math.max(1, parseInt(e.target.value) || 0))}
+                    onChange={(e) => setManualQty(Math.max(0, Number(e.target.value) || 0))}
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-lg font-bold text-sm text-slate-900 focus:ring-2 focus:ring-rose-500 outline-hidden"
                   />
                   {selectedOutcomingItem && (
@@ -2863,14 +2868,14 @@ export const OutbondSection: React.FC = () => {
                             {activeDeploymentOrder.status === 'PO Terkirim' ? (
                               <div className="inline-flex items-center justify-center gap-1">
                                 <input
-                                  type="number"
-                                  min="1"
+                                  type="number" step="0.001"
+                                  min="0.001"
                                   value={it.qty}
                                   onChange={(e) => {
-                                    const parsed = parseInt(e.target.value, 10);
+                                    const parsed = Number(e.target.value);
                                     handleDirectUpdateDeploymentQty(
                                       it.sku,
-                                      Number.isNaN(parsed) ? 1 : Math.max(1, parsed)
+                                      Number.isNaN(parsed) ? 0.001 : Math.max(0.001, parsed)
                                     );
                                   }}
                                   className="w-16 px-1.5 py-0.5 text-center font-extrabold rounded text-xs outline-hidden transition border border-slate-300 bg-white text-slate-900 focus:ring-1 focus:ring-blue-500"
@@ -2889,7 +2894,7 @@ export const OutbondSection: React.FC = () => {
                           <td className="px-2.5 py-1 bg-rose-50/30 border-x border-rose-100">
                             <div className="flex items-center justify-center gap-1.5">
                               <input
-                                type="number"
+                                type="number" step="0.001"
                                 min="0"
                                 placeholder=""
                                 value={it.qtyPrepared === undefined || it.qtyPrepared === null ? '' : it.qtyPrepared}
@@ -2898,7 +2903,7 @@ export const OutbondSection: React.FC = () => {
                                   if (raw === '') {
                                     handleDirectUpdatePreparedQty(it.sku, undefined);
                                   } else {
-                                    const parsed = parseInt(raw, 10);
+                                    const parsed = Number(raw);
                                     handleDirectUpdatePreparedQty(
                                       it.sku,
                                       Number.isNaN(parsed) ? 0 : Math.max(0, parsed)
@@ -3697,11 +3702,11 @@ export const OutbondSection: React.FC = () => {
                     </label>
                     <div className="relative">
                       <input
-                        type="number"
-                        min="1"
+                        type="number" step="0.001"
+                        min="0.001"
                         required
                         value={addQty}
-                        onChange={(e) => setAddQty(Math.max(1, parseInt(e.target.value) || 1))}
+                        onChange={(e) => setAddQty(Math.max(0.001, Number(e.target.value) || 0.001))}
                         className="w-full px-3 py-2 border border-slate-300 rounded-lg font-bold text-sm focus:ring-2 focus:ring-rose-500 outline-hidden"
                       />
                       {addDeployUnit && (
@@ -3774,10 +3779,10 @@ export const OutbondSection: React.FC = () => {
                   Qty ({editingItem.unit}):
                 </label>
                 <input
-                  type="number"
-                  min="1"
+                  type="number" step="0.001"
+                  min="0.001"
                   value={editQty}
-                  onChange={(e) => setEditQty(Math.max(1, parseInt(e.target.value) || 1))}
+                  onChange={(e) => setEditQty(Math.max(0.001, Number(e.target.value) || 0.001))}
                   className="w-full text-center py-2 border border-slate-300 rounded-lg font-bold text-sm focus:ring-2 focus:ring-rose-500 outline-hidden"
                 />
               </div>

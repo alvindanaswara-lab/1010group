@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef, useMemo } from 'react';
 import {
   AuditActionCategory,
   AuditChangeItem,
@@ -21,34 +21,20 @@ import {
   User,
   Vendor,
 } from '../types';
-import {
-  INITIAL_AUDIT_LOGS,
-  INITIAL_INVENTORY,
-  INITIAL_OUTLETS,
-  INITIAL_OUTLET_ORDERS,
-  INITIAL_PURCHASE_ORDERS,
-  INITIAL_RECEIVING,
-  INITIAL_USERS,
-  INITIAL_VENDORS,
-} from '../data/mockData';
 import { formatDate } from '../utils/dateUtils';
 import { formatRupiah } from '../utils/excelExport';
 import {
   formatPeriodLabel,
   getCurrentPeriodKey,
   getNextPeriod,
-  getPrevPeriod,
   normalizeInventoryItem,
 } from '../utils/inventoryUtils';
 import { findInventoryItemBySku } from '../utils/prOutletTemplate';
-import {
-  auth,
-  signInWithGooglePopup,
-  getFreshIdToken,
-  clearMemoryIdToken,
-} from '../lib/firebase';
-import { signOut } from 'firebase/auth';
-
+import { api, changesBetween, recordKey, WarehouseError } from '../lib/warehouseApi';
+import type { WarehouseRecord, SessionUser } from '../lib/warehouseApi';
+import { jakartaDate, roundMoney, roundQuantity } from '../utils/inventoryUtils';
+import { calculateReceipt, type ReceiptEntry } from '../utils/receiving';
+import { canApprovePO, canReleasePO, purchaseTerms, revisePO } from '../utils/purchaseApproval';
 
 interface AppContextType {
   outlets: OutletData[];
@@ -57,21 +43,16 @@ interface AppContextType {
   deleteOutlet: (id: string) => void;
 
   isAuthenticated: boolean;
-  login: (
-    usernameOrEmail: string,
-    password?: string
-  ) => { success: boolean; message?: string; user?: User };
-  loginWithGoogle: () => Promise<{ success: boolean; message?: string; user?: User }>;
-  loginAsUser: (user: User) => void;
+  login: (email: string, password: string) => Promise<{ success: boolean; message?: string; user?: User }>;
   logout: () => void;
 
   currentUser: User;
-  setCurrentUser: (user: User) => void;
   users: User[];
-  addUser: (user: Omit<User, 'id'>) => void;
-  updateUser: (user: User) => void;
-  deleteUser: (id: string) => void;
+  addUser: (user: Omit<User, 'id'>) => Promise<void>;
+  updateUser: (user: User) => Promise<void>;
+  deleteUser: (id: string) => Promise<void>;
 
+  confirmPendingSave: () => Promise<void>;
   inventory: InventoryItem[];
   updateStockOpname: (sku: string, opnameQty: number) => void;
   addInventoryItem: (item: InventoryItem) => void;
@@ -181,25 +162,21 @@ interface AppContextType {
     receivingIds: string[];
     message: string;
   };
-  recordVendorEmailSent: (
-    poId: string,
-    entries: { vendorName: string; email: string; subject?: string }[]
-  ) => void;
 
   receivingRecords: InboundReceivingRecord[];
   receiveGoods: (
     recordId: string,
-    receivedItems: { sku: string; qtyReceived: number; unitPrice?: number }[],
+    receivedItems: ReceiptEntry[],
     notes?: string
-  ) => void;
+  ) => { success: boolean; message: string };
   deleteReceivingRecord: (id: string) => void;
 
   manualInboundRecords: ManualInboundRecord[];
-  addManualInbound: (record: Omit<ManualInboundRecord, 'id' | 'date'> & { date?: string }) => void;
+  addManualInbound: (record: Omit<ManualInboundRecord, 'id' | 'date'> & { date?: string }) => { success: boolean; message: string };
   deleteManualInbound: (id: string) => void;
 
   manualOutbondRecords: ManualOutbondRecord[];
-  addManualOutbond: (record: Omit<ManualOutbondRecord, 'id' | 'date'> & { date?: string }) => void;
+  addManualOutbond: (record: Omit<ManualOutbondRecord, 'id' | 'date'> & { date?: string }) => { success: boolean; message: string };
   deleteManualOutbond: (id: string) => void;
 
   deployOutletOrder: (
@@ -243,227 +220,184 @@ interface AppContextType {
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
-const STORAGE_KEYS = {
-  OUTLETS: '1010group_outlets_v1',
-  USERS: '1010group_users_v1',
-  CURRENT_USER: '1010group_curr_user_v1',
-  AUTH_SESSION: '1010group_auth_session_v1',
-  INVENTORY: '1010group_inventory_v11_empty',
-  PERIODIC_INV: '1010group_periodic_inv_v11_empty',
-  SO_REPORTS: '1010group_so_reports_v11_empty',
-  OUTLET_ORDERS: '1010group_orders_v11_empty',
-  PURCHASE_ORDERS: '1010group_po_v11_empty',
-  VENDORS: '1010group_vendors_v11_empty',
-  RECEIVING: '1010group_rcv_v11_empty',
-  MANUAL_INBOUND: '1010group_man_in_v11_empty',
-  MANUAL_OUTBOND: '1010group_man_out_v11_empty',
-  AUDIT_LOGS: '1010group_audit_logs_v11_empty',
+const signedOutUser: User = {
+  id: '', email: '', username: '', position: 'Outlet', access: [],
 };
-
-// Clean up legacy mock forms and older inventory cache from localStorage
-if (typeof window !== 'undefined') {
-  try {
-    [
-      '1010group_orders_v1',
-      '1010group_orders_v2',
-      '1010group_po_v1',
-      '1010group_po_v2',
-      '1010group_rcv_v1',
-      '1010group_rcv_v2',
-      '1010group_man_in_v1',
-      '1010group_man_in_v2',
-      '1010group_man_out_v1',
-      '1010group_man_out_v2',
-      '1010group_inventory_v1',
-      '1010group_inventory_v2',
-      '1010group_inventory_v3',
-      '1010group_inventory_v10_clean',
-      '1010group_periodic_inv',
-      '1010group_periodic_inv_v1',
-      '1010group_periodic_inv_v2',
-      '1010group_periodic_inv_v3',
-      '1010group_periodic_inv_v4',
-      '1010group_periodic_inv_v5',
-      '1010group_periodic_inv_v6',
-      '1010group_periodic_inv_v10_clean',
-      '1010group_so_reports_v4',
-      '1010group_audit_logs_v1',
-      '1010group_vendors_v1',
-    ].forEach((k) => {
-      localStorage.removeItem(k);
-    });
-  } catch {
-    // Ignore in non-browser context
-  }
-}
+const EMPTY_INVENTORY: InventoryItem[] = [];
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
-    if (typeof window !== 'undefined') {
-      return sessionStorage.getItem(STORAGE_KEYS.AUTH_SESSION) === 'true';
-    }
-    return false;
-  });
-
-  const [outlets, setOutlets] = useState<OutletData[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.OUTLETS);
-    return saved ? JSON.parse(saved) : INITIAL_OUTLETS;
-  });
-
-  const [users, setUsers] = useState<User[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.USERS);
-    const parsed: User[] = saved ? JSON.parse(saved) : INITIAL_USERS;
-    return parsed.map((u) => ({
-      ...u,
-      password: u.password && u.password.trim() !== '' ? u.password : 'password123',
+  const [session, setSession] = useState<User | null>(null);
+  const currentUser = session ?? signedOutUser;
+  const isAuthenticated = session !== null;
+  const [loadingSession, setLoadingSession] = useState(true);
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState('');
+  const [outlets, setOutlets] = useState<OutletData[]>([]);
+  const [users, setUsers] = useState<User[]>([]);
+  const [selectedPeriod, setSelectedPeriodState] = useState(getCurrentPeriodKey);
+  const [periodicInventories, setPeriodicInventories] = useState<Record<string, InventoryItem[]>>({});
+  const inventory = periodicInventories[selectedPeriod] ?? EMPTY_INVENTORY;
+  const setInventory = (update: React.SetStateAction<InventoryItem[]>) => {
+    setPeriodicInventories((previous) => ({
+      ...previous,
+      [selectedPeriod]: typeof update === 'function' ? update(previous[selectedPeriod] ?? EMPTY_INVENTORY) : update,
     }));
+  };
+  const [stockOpnameReports, setStockOpnameReports] = useState<StockOpnameReport[]>([]);
+  const [outletOrders, setOutletOrders] = useState<OutletOrder[]>([]);
+  const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
+  const [vendors, setVendors] = useState<Vendor[]>([]);
+  const [receivingRecords, setReceivingRecords] = useState<InboundReceivingRecord[]>([]);
+  const [manualInboundRecords, setManualInboundRecords] = useState<ManualInboundRecord[]>([]);
+  const [manualOutbondRecords, setManualOutbondRecords] = useState<ManualOutbondRecord[]>([]);
+  const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
+  const baseline = useRef<WarehouseRecord[]>([]);
+  const currentRecords = useMemo(() => {
+    const rows = <T extends { id: string }>(kind: string, items: T[]) =>
+      items.map((data) => ({ kind, id: data.id, data: { ...data } as Record<string, unknown> }));
+    return [
+      ...rows('outlet', outlets),
+      ...rows('order', outletOrders),
+      ...rows('po', purchaseOrders),
+      ...rows('vendor', vendors),
+      ...rows('receipt', receivingRecords),
+      ...rows('inbound', manualInboundRecords),
+      ...rows('outbound', manualOutbondRecords),
+      ...rows('opname', stockOpnameReports),
+      ...rows('audit', auditLogs),
+      ...Object.entries(periodicInventories).flatMap(([period, items]) => items.map((item) => ({
+        kind: 'stock',
+        id: period + ':' + item.sku,
+        data: { ...item, period } as Record<string, unknown>,
+      }))),
+    ];
+  }, [outlets, outletOrders, purchaseOrders, vendors, receivingRecords, manualInboundRecords,
+    manualOutbondRecords, stockOpnameReports, auditLogs, periodicInventories]);
+  const latestRecords = useRef(currentRecords);
+  latestRecords.current = currentRecords;
+  const inFlight = useRef(false);
+  const changes = loaded && isAuthenticated ? changesBetween(baseline.current, currentRecords) : [];
+  const [saveRequest, setSaveRequest] = useState(0);
+  const saveWaiters = useRef<{ resolve: () => void; reject: (error: Error) => void }[]>([]);
+  const confirmPendingSave = () => new Promise<void>((resolve, reject) => {
+    saveWaiters.current.push({ resolve, reject });
+    setSaveRequest((request) => request + 1);
   });
 
-  const [currentUser, setCurrentUser] = useState<User>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.CURRENT_USER);
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        return {
-          ...parsed,
-          password: parsed.password && parsed.password.trim() !== '' ? parsed.password : 'password123',
-        };
-      } catch {
-        // fallback
+  useEffect(() => {
+    if (!saveWaiters.current.length) return;
+    if (saveError || !loaded || !isAuthenticated) {
+      const error = new Error(saveError || 'Sesi tidak tersedia.');
+      saveWaiters.current.splice(0).forEach(({ reject }) => reject(error));
+    } else if (!saving && !inFlight.current && changes.length === 0) {
+      saveWaiters.current.splice(0).forEach(({ resolve }) => resolve());
+    }
+  }, [saveRequest, saving, changes.length, saveError, loaded, isAuthenticated]);
+
+
+  const hydrate = (records: WarehouseRecord[]) => {
+    baseline.current = records;
+    const rows = <T,>(kind: string) => records.filter((r) => r.kind === kind).map((r) => r.data as T);
+    const periods: Record<string, InventoryItem[]> = {};
+    for (const item of rows<InventoryItem>('stock')) {
+      const period = item.period!;
+      (periods[period] ??= []).push(item);
+    }
+    setOutlets(rows<OutletData>('outlet'));
+    setOutletOrders(rows<OutletOrder>('order').sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
+    setPurchaseOrders(rows<PurchaseOrder>('po').sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
+    setVendors(rows<Vendor>('vendor'));
+    setReceivingRecords(rows<InboundReceivingRecord>('receipt'));
+    setManualInboundRecords(rows<ManualInboundRecord>('inbound').sort((a, b) => b.date.localeCompare(a.date)));
+    setManualOutbondRecords(rows<ManualOutbondRecord>('outbound').sort((a, b) => b.date.localeCompare(a.date)));
+    setStockOpnameReports(rows<StockOpnameReport>('opname').sort((a, b) => b.period.localeCompare(a.period)));
+    setAuditLogs(rows<AuditLogEntry>('audit').sort((a, b) => b.timestamp.localeCompare(a.timestamp)));
+    setPeriodicInventories(periods);
+  };
+
+  const loadRecords = async () => {
+    const [records, directory] = await Promise.all([
+      api<WarehouseRecord[]>('records'), api<User[]>('users'),
+    ]);
+    hydrate(records);
+    setUsers(directory);
+    setLoaded(true);
+    setSaveError('');
+  };
+
+  useEffect(() => {
+    // Remove credentials left behind by the demo version; operational data stays available for backup.
+    for (const key of ['1010group_users_v1', '1010group_curr_user_v1']) localStorage.removeItem(key);
+    sessionStorage.removeItem('1010group_auth_session_v1');
+    api<SessionUser>('session').then(({ user }) => setSession(user)).catch((error: unknown) => {
+      if (!(error instanceof WarehouseError) || error.status !== 401) {
+        setSaveError(error instanceof Error ? error.message : 'Sesi tidak dapat dimuat.');
       }
-    }
-    return INITIAL_USERS[0]; // Admin by default
-  });
+    }).finally(() => setLoadingSession(false));
+  }, []);
 
-  const [selectedPeriod, setSelectedPeriodState] = useState<string>(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('1010group_selected_period_v2');
-      if (saved) return saved;
-    }
-    return getCurrentPeriodKey();
-  });
+  useEffect(() => {
+    if (!session) return;
+    loadRecords().catch((error: Error) => setSaveError(error.message));
+  }, [session?.id]);
 
-  const [periodicInventories, setPeriodicInventories] = useState<Record<string, InventoryItem[]>>(() => {
-    const defaultPeriod = getCurrentPeriodKey();
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem(STORAGE_KEYS.PERIODIC_INV);
-      if (saved) {
-        try {
-          const parsed = JSON.parse(saved);
-          if (parsed && typeof parsed === 'object') {
-            return parsed;
-          }
-        } catch {
-          // fallback
+  useEffect(() => {
+    if (!loaded || !isAuthenticated || saving || saveError || !changes.length || inFlight.current) return;
+    inFlight.current = true;
+    setSaving(true);
+    api<WarehouseRecord[]>('records', 'POST', { changes }).then((saved) => {
+      const next = new Map(baseline.current.map((row) => [recordKey(row), row]));
+      for (const change of changes) next.delete(recordKey(change));
+      for (const row of saved) next.set(recordKey(row), row);
+      const records = [...next.values()];
+      const currentUserRows = new Map(latestRecords.current.map((record) => [recordKey(record), record]));
+      const submittedRows = new Map(changes.map((record) => [recordKey(record), record]));
+      const canonicalRows = new Map(records.map((record) => [recordKey(record), record]));
+      for (const change of changesBetween(baseline.current, latestRecords.current)) {
+        const key = recordKey(change);
+        const savedChange = submittedRows.get(key);
+        if (savedChange && JSON.stringify(savedChange.data) === JSON.stringify(change.data)) continue;
+        if (!change.data) canonicalRows.delete(key);
+        else canonicalRows.set(key, { ...currentUserRows.get(key)!, version: next.get(key)?.version ?? 0 });
+      }
+      hydrate([...canonicalRows.values()]);
+      baseline.current = records;
+    }).catch((error: Error) => {
+      setSaveError(error instanceof WarehouseError && error.status === 409
+        ? 'Data berubah di perangkat lain. Muat ulang data server dan ulangi perubahan.'
+        : error.message);
+    }).finally(() => {
+      inFlight.current = false;
+      setSaving(false);
+    });
+  }, [currentRecords, loaded, isAuthenticated, saving, saveError]);
+
+  useEffect(() => {
+    if (!loaded || !isAuthenticated || saveError) return;
+    const refresh = async () => {
+      if (inFlight.current || changesBetween(baseline.current, latestRecords.current).length) return;
+      const snapshot = latestRecords.current;
+      try {
+        const records = await api<WarehouseRecord[]>('records');
+        if (snapshot === latestRecords.current && !inFlight.current &&
+            !changesBetween(baseline.current, latestRecords.current).length) hydrate(records);
+      } catch (error) {
+        if (error instanceof WarehouseError && [401, 403].includes(error.status)) {
+          setSaveError('Akses sesi berakhir. Silakan keluar lalu masuk kembali.');
         }
       }
-    }
-    return {
-      [defaultPeriod]: INITIAL_INVENTORY.map((it) => normalizeInventoryItem(it, defaultPeriod)),
     };
-  });
+    const timer = window.setInterval(refresh, 12000);
+    return () => window.clearInterval(timer);
+  }, [loaded, isAuthenticated, saveError]);
 
-  const [inventory, setInventory] = useState<InventoryItem[]>(() => {
-    const defaultPeriod = getCurrentPeriodKey();
-    if (typeof window !== 'undefined') {
-      const savedPeriodic = localStorage.getItem(STORAGE_KEYS.PERIODIC_INV);
-      const savedPeriod = localStorage.getItem('1010group_selected_period_v2') || defaultPeriod;
-      if (savedPeriodic) {
-        try {
-          const parsed = JSON.parse(savedPeriodic);
-          if (parsed && Array.isArray(parsed[savedPeriod])) {
-            return parsed[savedPeriod].map((it: Partial<InventoryItem>) => normalizeInventoryItem(it, savedPeriod));
-          }
-        } catch {
-          // fallback
-        }
-      }
-    }
-    return INITIAL_INVENTORY.map((it) => normalizeInventoryItem(it, defaultPeriod));
-  });
-
-  const [stockOpnameReports, setStockOpnameReports] = useState<StockOpnameReport[]>(() => {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem(STORAGE_KEYS.SO_REPORTS);
-      if (saved) {
-        try {
-          return JSON.parse(saved);
-        } catch {
-          // fallback
-        }
-      }
-    }
-    return [];
-  });
-
-
-  const [outletOrders, setOutletOrders] = useState<OutletOrder[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.OUTLET_ORDERS);
-    return saved ? JSON.parse(saved) : INITIAL_OUTLET_ORDERS;
-  });
-
-  const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.PURCHASE_ORDERS);
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) return parsed;
-      } catch {
-        // fallback
-      }
-    }
-    return INITIAL_PURCHASE_ORDERS;
-  });
-
-  const [vendors, setVendors] = useState<Vendor[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.VENDORS);
-    if (saved) {
-      try {
-        const parsed: Vendor[] = JSON.parse(saved);
-        if (Array.isArray(parsed)) {
-          return parsed.map((v) => {
-            if (v.minimumOrder !== undefined) return v;
-            const defaultMatch = INITIAL_VENDORS.find((iv) => iv.id === v.id || iv.namaVendor === v.namaVendor);
-            return {
-              ...v,
-              minimumOrder: defaultMatch?.minimumOrder ?? 0,
-            };
-          });
-        }
-      } catch {
-        // fallback
-      }
-    }
-    return INITIAL_VENDORS;
-  });
-
-  const [receivingRecords, setReceivingRecords] = useState<InboundReceivingRecord[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.RECEIVING);
-    return saved ? JSON.parse(saved) : INITIAL_RECEIVING;
-  });
-
-  const [manualInboundRecords, setManualInboundRecords] = useState<ManualInboundRecord[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.MANUAL_INBOUND);
-    return saved ? JSON.parse(saved) : [];
-  });
-
-  const [manualOutbondRecords, setManualOutbondRecords] = useState<ManualOutbondRecord[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.MANUAL_OUTBOND);
-    return saved ? JSON.parse(saved) : [];
-  });
-
-  const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.AUDIT_LOGS);
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) return parsed;
-      } catch {
-        // fallback
-      }
-    }
-    return INITIAL_AUDIT_LOGS;
-  });
+  useEffect(() => {
+    if (!saving && !changes.length) return;
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [saving, changes.length]);
 
   const resolveDefaultDepartment = (): AuditDepartmentScope => {
     if (currentUser.department) return currentUser.department;
@@ -493,7 +427,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }) => {
     const now = new Date();
     const datePart = now.toISOString().slice(0, 10).replace(/-/g, '');
-    const randSuffix = String(Math.floor(1000 + Math.random() * 9000));
+    const randSuffix = crypto.randomUUID();
     const newEntry: AuditLogEntry = {
       id: `AUD-${datePart}-${randSuffix}`,
       timestamp: now.toISOString(),
@@ -512,72 +446,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setAuditLogs((prev) => [newEntry, ...prev]);
   };
 
-  const clearAuditLogs = () => {
-    setAuditLogs([]);
-    localStorage.removeItem(STORAGE_KEYS.AUDIT_LOGS);
-  };
-
-  // Persist to localStorage
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.OUTLETS, JSON.stringify(outlets));
-  }, [outlets]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
-  }, [users]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.CURRENT_USER, JSON.stringify(currentUser));
-  }, [currentUser]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.INVENTORY, JSON.stringify(inventory));
-    setPeriodicInventories((prev) => ({
-      ...prev,
-      [selectedPeriod]: inventory,
-    }));
-  }, [inventory, selectedPeriod]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.PERIODIC_INV, JSON.stringify(periodicInventories));
-  }, [periodicInventories]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.SO_REPORTS, JSON.stringify(stockOpnameReports));
-  }, [stockOpnameReports]);
-
-  useEffect(() => {
-    localStorage.setItem('1010group_selected_period_v2', selectedPeriod);
-  }, [selectedPeriod]);
-
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.OUTLET_ORDERS, JSON.stringify(outletOrders));
-  }, [outletOrders]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.PURCHASE_ORDERS, JSON.stringify(purchaseOrders));
-  }, [purchaseOrders]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.VENDORS, JSON.stringify(vendors));
-  }, [vendors]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.RECEIVING, JSON.stringify(receivingRecords));
-  }, [receivingRecords]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.MANUAL_INBOUND, JSON.stringify(manualInboundRecords));
-  }, [manualInboundRecords]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.MANUAL_OUTBOND, JSON.stringify(manualOutbondRecords));
-  }, [manualOutbondRecords]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.AUDIT_LOGS, JSON.stringify(auditLogs));
-  }, [auditLogs]);
+  const clearAuditLogs = () => window.alert('Riwayat audit tersimpan dan tidak dapat dihapus.');
 
   // Permission access checker
   const canAccess = (feature: string): boolean => {
@@ -603,135 +472,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // Authentication & Session
-  const login = (
-    usernameOrEmail: string,
-    password?: string
-  ): { success: boolean; message?: string; user?: User } => {
-    const clean = usernameOrEmail.trim().toLowerCase();
-    if (!clean) {
-      return { success: false, message: 'Harap masukkan Username atau Email Anda.' };
-    }
-
-    const matched = users.find(
-      (u) =>
-        u.username.toLowerCase() === clean ||
-        u.email.toLowerCase() === clean
-    );
-
-    if (!matched) {
-      return {
-        success: false,
-        message: 'Pengguna tidak ditemukan. Pastikan username atau email sudah benar.',
-      };
-    }
-
-    // Check password if set
-    if (matched.password && matched.password.trim() !== '') {
-      if (!password || password !== matched.password) {
-        return {
-          success: false,
-          message: 'Password salah. Silakan coba kembali (default demo: password123).',
-        };
-      }
-    }
-
-    setCurrentUser(matched);
-    setIsAuthenticated(true);
-    if (typeof window !== 'undefined') {
-      sessionStorage.setItem(STORAGE_KEYS.AUTH_SESSION, 'true');
-    }
-    return { success: true, user: matched };
-  };
-
-  const loginWithGoogle = async (): Promise<{
-    success: boolean;
-    message?: string;
-    user?: User;
-  }> => {
+  const login = async (email: string, password: string) => {
     try {
-      const { firebaseUser, idToken } = await signInWithGooglePopup();
-      const email = (firebaseUser.email || '').toLowerCase();
-      const displayName = firebaseUser.displayName || email.split('@')[0] || 'user';
-
-      // Match existing app user by email or create/use Administrator if primary owner
-      let matched = users.find((u) => u.email.toLowerCase() === email);
-      if (!matched) {
-        const newId = `USR-${String(users.length + 1).padStart(3, '0')}`;
-        matched = {
-          id: newId,
-          username: displayName.replace(/\s+/g, '.').toLowerCase(),
-          position: 'Administrator',
-          access: [
-            'Master Inventory',
-            'Inbound',
-            'Outbond',
-            'Purchase Request',
-            'Vendor',
-            'Cost Control',
-            'System & Setting',
-            'Dashboard Outlet',
-            'Order Outlet',
-            'Deployment',
-          ],
-          email: firebaseUser.email || `${displayName}@1010group.id`,
-          password: 'password123',
-          placement: 'Head Office/Warehouse',
-        };
-        setUsers((prev) => [...prev, matched!]);
-      }
-
-      // Synchronize user record with Cloud SQL backend
-      try {
-        await fetch('/api/auth/sync', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${idToken}`,
-          },
-          body: JSON.stringify({
-            email: matched.email,
-            username: matched.username,
-            position: matched.position,
-          }),
-        });
-      } catch (syncErr) {
-        console.error('Background user sync warning:', syncErr);
-      }
-
-      setCurrentUser(matched);
-      setIsAuthenticated(true);
-      if (typeof window !== 'undefined') {
-        sessionStorage.setItem(STORAGE_KEYS.AUTH_SESSION, 'true');
-      }
-      return { success: true, user: matched };
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Gagal login dengan Google.';
-      return { success: false, message: msg };
+      const { user } = await api<SessionUser>('login', 'POST', { email: email.trim(), password });
+      setSaveError('');
+      setSession(user);
+      return { success: true, user };
+    } catch (error) {
+      return { success: false, message: error instanceof Error ? error.message : 'Gagal masuk.' };
     }
   };
 
-  const loginAsUser = (user: User) => {
-    setCurrentUser(user);
-    setIsAuthenticated(true);
-    if (typeof window !== 'undefined') {
-      sessionStorage.setItem(STORAGE_KEYS.AUTH_SESSION, 'true');
+  const logout = async () => {
+    if (inFlight.current) return;
+    try {
+      await api('logout', 'POST');
+      setLoaded(false);
+      setSession(null);
+      setUsers([]);
+      hydrate([]);
+      setSaveError('');
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : 'Gagal keluar.');
     }
   };
 
-  const logout = () => {
-    setIsAuthenticated(false);
-    clearMemoryIdToken();
-    if (auth.currentUser) {
-      signOut(auth).catch(() => {});
-    }
-    if (typeof window !== 'undefined') {
-      sessionStorage.removeItem(STORAGE_KEYS.AUTH_SESSION);
-    }
-  };
-
-  // Outlet Control
   const addOutlet = (outletData: Omit<OutletData, 'id'>) => {
-    const id = `OUT-${String(outlets.length + 1).padStart(3, '0')}`;
+    const id = 'OUT-' + crypto.randomUUID();
     const newOutlet: OutletData = { ...outletData, id };
     setOutlets((prev) => [...prev, newOutlet]);
   };
@@ -745,89 +512,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // User Control
-  const addUser = (userData: Omit<User, 'id'>) => {
-    const id = `USR-${String(users.length + 1).padStart(3, '0')}`;
-    const newUser: User = { ...userData, id };
-    setUsers((prev) => [...prev, newUser]);
+  const addUser = async (user: Omit<User, 'id'>) => {
+    const result = await api<SessionUser>('users', 'POST', user);
+    setUsers((previous) => [...previous, result.user]);
   };
 
-  const updateUser = (updated: User) => {
-    setUsers((prev) => prev.map((u) => (u.id === updated.id ? updated : u)));
-    if (currentUser.id === updated.id) {
-      setCurrentUser(updated);
-      getFreshIdToken()
-        .then((token) => {
-          if (token) {
-            return fetch('/api/users/me', {
-              method: 'PUT',
-              headers: {
-                'Content-Type': 'application/json',
-                Authorization: `Bearer ${token}`,
-              },
-              body: JSON.stringify({
-                username: updated.username,
-                email: updated.email,
-                position: updated.position,
-                placement: updated.placement,
-                outletName: updated.outletName,
-                department: updated.department,
-              }),
-            });
-          }
-        })
-        .catch((err) => {
-          console.error('Background profile update warning:', err);
-        });
-    }
+  const updateUser = async (user: User) => {
+    const result = await api<SessionUser>('users', 'PUT', user);
+    setUsers((previous) => previous.map((u) => u.id === result.user.id ? result.user : u));
+    if (currentUser.id === result.user.id) setSession(result.user);
   };
 
-  const deleteUser = (id: string) => {
-    setUsers((prev) => prev.filter((u) => u.id !== id));
+  const deleteUser = async (id: string) => {
+    await api('users', 'DELETE', { id });
+    setUsers((previous) => previous.filter((u) => u.id !== id));
   };
 
-  // Periodic Inventory & Selection
-  const setSelectedPeriod = (newPeriod: string) => {
-    setSelectedPeriodState(newPeriod);
-    if (typeof window !== 'undefined') {
-      localStorage.setItem('1010group_selected_period_v2', newPeriod);
-    }
-
-    setPeriodicInventories((prev) => {
-      if (prev[newPeriod] && prev[newPeriod].length > 0) {
-        setInventory(prev[newPeriod]);
-        return prev;
-      }
-      // Check if previous period exists to carry over ending stock as beginning stock
-      const prevKey = getPrevPeriod(newPeriod);
-      if (prev[prevKey] && prev[prevKey].length > 0) {
-        const carriedList = prev[prevKey].map((it) =>
-          normalizeInventoryItem(
-            {
-              ...it,
-              beginningInventory: it.stockOpname || it.endingInventory,
-              inbound: 0,
-              outbond: 0,
-              stockOpname: it.stockOpname || it.endingInventory,
-              period: newPeriod,
-            },
-            newPeriod
-          )
-        );
-        setInventory(carriedList);
-        return {
-          ...prev,
-          [newPeriod]: carriedList,
-        };
-      }
-      // Otherwise initialize fresh (dimulai dengan list data kosong)
-      const freshList: InventoryItem[] = [];
-      setInventory(freshList);
-      return {
-        ...prev,
-        [newPeriod]: freshList,
-      };
-    });
-  };
+  const setSelectedPeriod = (newPeriod: string) => setSelectedPeriodState(newPeriod);
 
   // Inventory Management
   const updateStockOpname = (sku: string, opnameQty: number) => {
@@ -841,16 +542,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             {
               ...item,
               stockOpname: opnameQty,
+            soValue: undefined,
             },
             selectedPeriod
           );
         }
         return item;
       });
-      setPeriodicInventories((periods) => ({
-        ...periods,
-        [selectedPeriod]: updated,
-      }));
       return updated;
     });
 
@@ -883,10 +581,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const normalized = normalizeInventoryItem(item, selectedPeriod);
     setInventory((prev) => {
       const updated = [...prev, normalized];
-      setPeriodicInventories((periods) => ({
-        ...periods,
-        [selectedPeriod]: updated,
-      }));
       return updated;
     });
   };
@@ -895,10 +589,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const normalized = normalizeInventoryItem(updated, selectedPeriod);
     setInventory((prev) => {
       const list = prev.map((item) => (item.sku === updated.sku ? normalized : item));
-      setPeriodicInventories((periods) => ({
-        ...periods,
-        [selectedPeriod]: list,
-      }));
       return list;
     });
   };
@@ -906,20 +596,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const deleteInventoryItem = (sku: string) => {
     setInventory((prev) => {
       const list = prev.filter((item) => item.sku !== sku);
-      setPeriodicInventories((periods) => ({
-        ...periods,
-        [selectedPeriod]: list,
-      }));
       return list;
     });
   };
 
   const clearMasterInventory = (options?: { allPeriods?: boolean }) => {
+    const rows = options?.allPeriods ? Object.values(periodicInventories).flat() : inventory;
+    if (currentUser.position !== 'Administrator' || rows.some((item) => item.inbound || item.outbond)
+        || stockOpnameReports.some((report) => options?.allPeriods || report.period === selectedPeriod)) {
+      return { success: false, message: 'Data dengan transaksi atau stock opname harus dipertahankan.' };
+    }
     if (options?.allPeriods) {
       setPeriodicInventories({
         [selectedPeriod]: [],
       });
-      setInventory([]);
       setStockOpnameReports([]);
       return {
         success: true,
@@ -931,7 +621,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ...prev,
       [selectedPeriod]: [],
     }));
-    setInventory([]);
     return {
       success: true,
       message: `Seluruh data list barang periode ${formatPeriodLabel(selectedPeriod)} berhasil dihapus dan dikosongkan.`,
@@ -955,14 +644,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       )
     );
 
+    const existingRows = periodicInventories[period] ?? EMPTY_INVENTORY;
+    const bySku = new Map(existingRows.map((item) => [item.sku.toUpperCase(), item]));
+    const importedSkus = new Set(normalizedNewItems.map((item) => item.sku.toUpperCase()));
+    const hasActivity = (item: InventoryItem) => !!(item.inbound || item.outbond);
+    if (currentUser.position !== 'Administrator' || stockOpnameReports.some((report) =>
+      report.period === period && ['Disetujui', 'Finalized (Generated)'].includes(report.status))) {
+      return { success: false, count: 0, message: 'Import hanya oleh administrator pada periode terbuka.' };
+    }
+    if (replaceAll && existingRows.some((item) => hasActivity(item) && !importedSkus.has(item.sku.toUpperCase()))) {
+      return { success: false, count: 0, message: 'Import tidak boleh menghapus SKU yang sudah memiliki transaksi.' };
+    }
+    const safeItems = normalizedNewItems.map((item) => {
+      const existing = bySku.get(item.sku.toUpperCase());
+      return existing && (hasActivity(existing) || existing.beginningInventory > 0) ? normalizeInventoryItem({
+        ...item, sku: existing.sku, unit: existing.unit, priceActual: existing.priceActual,
+        beginningInventory: existing.beginningInventory, beginningValue: existing.beginningValue,
+        inbound: existing.inbound, inboundValue: existing.inboundValue, outbond: existing.outbond,
+        outbondValue: existing.outbondValue, stockOpname: existing.stockOpname, soValue: existing.soValue,
+      }, period) : item;
+    });
     let finalItems: InventoryItem[] = [];
     if (replaceAll) {
-      finalItems = normalizedNewItems;
+      finalItems = safeItems;
     } else {
-      const existing = periodicInventories[period] || inventory || [];
+      const existing = periodicInventories[period] ?? EMPTY_INVENTORY;
       const itemMap = new Map<string, InventoryItem>();
       existing.forEach((item) => itemMap.set(item.sku.toUpperCase(), item));
-      normalizedNewItems.forEach((item) => itemMap.set(item.sku.toUpperCase(), item));
+      safeItems.forEach((item) => itemMap.set(item.sku.toUpperCase(), item));
       finalItems = Array.from(itemMap.values());
     }
 
@@ -971,9 +680,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       [period]: finalItems,
     }));
 
-    if (period === selectedPeriod) {
-      setInventory(finalItems);
-    }
 
     return {
       success: true,
@@ -990,9 +696,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     sku: string,
     deltaInbound: number,
     deltaOutbond: number,
-    inboundUnitPrice?: number
+    inboundUnitPrice: number | undefined,
+    period: string
   ) => {
-    setInventory((prev) => {
+    setPeriodicInventories((previous) => {
+      const prev = previous[period] ?? EMPTY_INVENTORY;
       const updated = prev.map((item) => {
         if (item.sku === sku) {
           const oldInbound = item.inbound || 0;
@@ -1002,19 +710,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               ? item.inboundValue
               : Math.round(oldInbound * oldPriceActual);
 
-          const newInbound = Math.max(0, oldInbound + deltaInbound);
-          const newOutbond = Math.max(0, (item.outbond || 0) + deltaOutbond);
+          const newInbound = roundQuantity(Math.max(0, oldInbound + deltaInbound));
+          const newOutbond = roundQuantity(Math.max(0, (item.outbond || 0) + deltaOutbond));
 
           let newPriceActual = oldPriceActual;
           let newInboundValue = oldInboundValue;
 
           if (deltaInbound !== 0) {
             const txUnitPrice =
-              inboundUnitPrice !== undefined && inboundUnitPrice > 0
+              inboundUnitPrice !== undefined && inboundUnitPrice >= 0
                 ? inboundUnitPrice
                 : oldPriceActual;
             if (newInbound > 0) {
-              newInboundValue = Math.max(0, Math.round(oldInboundValue + deltaInbound * txUnitPrice));
+              newInboundValue = Math.max(0, roundMoney(oldInboundValue + Math.sign(deltaInbound) * roundMoney(Math.abs(deltaInbound) * txUnitPrice)));
               newPriceActual = Math.round(newInboundValue / newInbound);
             } else {
               newInboundValue = 0;
@@ -1030,16 +738,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               priceActual: newPriceActual,
               outbond: newOutbond,
             },
-            selectedPeriod
+            period
           );
         }
         return item;
       });
-      setPeriodicInventories((periods) => ({
-        ...periods,
-        [selectedPeriod]: updated,
-      }));
-      return updated;
+      return { ...previous, [period]: updated };
     });
   };
 
@@ -1053,7 +757,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     notes?: string;
     submitForReview?: boolean;
   }) => {
-    const currentPeriodItems = periodicInventories[data.period] || inventory;
+    const existing = stockOpnameReports.find((report) => report.period === data.period);
+    if (existing && existing.status !== 'Draft') {
+      return { success: false, reportId: existing.id, message: 'Report SO sedang ditinjau atau sudah disetujui.' };
+    }
+    const currentPeriodItems = periodicInventories[data.period] ?? EMPTY_INVENTORY;
+    if (!currentPeriodItems.length || data.conductedDate.slice(0, 7) !== data.period ||
+        (data.submitForReview && currentPeriodItems.some((item) => !data.items.some((count) =>
+          count.sku === item.sku && Number.isFinite(count.physicalCount) && count.physicalCount >= 0)))) {
+      return { success: false, reportId: '', message: 'Periksa tanggal periode dan lengkapi hitungan fisik.' };
+    }
     const periodLabel = formatPeriodLabel(data.period);
     const reportId = `SO-${data.period}`;
 
@@ -1065,9 +778,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const opnameItems: StockOpnameItem[] = currentPeriodItems.map((invItem) => {
       const match = data.items.find((i) => i.sku === invItem.sku);
       const count = match !== undefined ? match.physicalCount : invItem.endingInventory;
-      const physicalVal = Math.round(count * (invItem.priceActual || invItem.priceBudget || 0));
+      const physicalVal = roundMoney(count * (invItem.priceActual ?? invItem.priceBudget ?? 0));
       const sysStock = invItem.endingInventory;
-      const sysVal = invItem.endingValue || Math.round(sysStock * (invItem.priceBudget || 0));
+      const sysVal = invItem.endingValue ?? roundMoney(sysStock * (invItem.priceBudget ?? 0));
       const gapQty = count - sysStock;
       const gapVal = sysVal - physicalVal;
 
@@ -1147,7 +860,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Stock Opname: Approve Report SO
   const approveStockOpnameReport = (reportId: string, reviewerName: string) => {
     const report = stockOpnameReports.find((r) => r.id === reportId);
-    if (!report) return { success: false, message: 'Report SO tidak ditemukan.' };
+    if (!report || report.status !== 'Menunggu Review' ||
+        !['Administrator', 'Cost Control'].includes(currentUser.position)) {
+      return { success: false, message: 'Report SO belum diajukan atau Anda tidak berwenang.' };
+    }
 
     const approvedReport: StockOpnameReport = {
       ...report,
@@ -1186,9 +902,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       [targetPeriod]: updatedInventory,
     }));
 
-    if (selectedPeriod === targetPeriod) {
-      setInventory(updatedInventory);
-    }
 
     addAuditLog({
       module: 'Master Inventory',
@@ -1213,7 +926,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Stock Opname: Reject / Revision Report SO
   const rejectStockOpnameReport = (reportId: string, reason?: string) => {
     const report = stockOpnameReports.find((r) => r.id === reportId);
-    if (!report) return { success: false, message: 'Report SO tidak ditemukan.' };
+    if (!report || !['Menunggu Review', 'Disetujui'].includes(report.status) ||
+        !['Administrator', 'Cost Control'].includes(currentUser.position)) {
+      return { success: false, message: 'Report SO belum diajukan atau Anda tidak berwenang.' };
+    }
 
     setStockOpnameReports((prev) =>
       prev.map((r) =>
@@ -1221,6 +937,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           ? {
               ...r,
               status: 'Draft',
+              approvedBy: undefined,
+              approvedAt: undefined,
               notes: reason ? `${r.notes ? r.notes + ' | ' : ''}Revisi: ${reason}` : r.notes,
               updatedAt: new Date().toISOString(),
             }
@@ -1257,7 +975,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         message: `Belum ada data SO untuk periode ${formatPeriodLabel(period)}.`,
       };
     }
-    if (report.status !== 'Disetujui' && report.status !== 'Finalized (Generated)') {
+    if (!['Administrator', 'Cost Control'].includes(currentUser.position)) {
+      return { success: false, nextPeriod: '', message: 'Anda tidak berwenang menutup periode.' };
+    }
+    if (report.status === 'Finalized (Generated)') {
+      return { success: true, nextPeriod: getNextPeriod(period), message: 'Periode sudah ditutup.' };
+    }
+    if (report.status !== 'Disetujui') {
       return {
         success: false,
         nextPeriod: '',
@@ -1269,13 +993,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const nextPeriodLabel = formatPeriodLabel(nextPeriod);
 
     // Current period items with approved SO counts
-    const currentItems = periodicInventories[period] || inventory;
+    const currentItems = periodicInventories[period] ?? EMPTY_INVENTORY;
+    if (!currentItems.length || currentItems.length !== report.items.length || currentItems.some((item) => {
+      const line = report.items.find((count) => count.sku === item.sku);
+      return !line || roundQuantity(item.endingInventory) !== roundQuantity(line.systemStock);
+    })) {
+      return { success: false, nextPeriod: '', message: 'Saldo berubah sejak penghitungan fisik. Tinjau koreksi sebelum tutup buku.' };
+    }
 
     // Generate next period inventory where Beginning Stock = current month's Stock Opname!
     const nextMonthItems: InventoryItem[] = currentItems.map((curr) => {
       const soMatch = report.items.find((i) => i.sku === curr.sku);
       const newBeginningQty = soMatch !== undefined ? soMatch.physicalCount : curr.stockOpname;
-      const newBeginningVal = Math.round(newBeginningQty * (curr.priceBudget || curr.price || 0));
+      const newBeginningVal = roundMoney(newBeginningQty * (curr.priceActual ?? curr.priceBudget ?? curr.price ?? 0));
 
       return normalizeInventoryItem(
         {
@@ -1295,7 +1025,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           endingInventory: newBeginningQty,
           endingValue: newBeginningVal,
           stockOpname: newBeginningQty,
-          soValue: Math.round(newBeginningQty * (curr.priceActual || curr.priceBudget || 0)),
+          soValue: newBeginningVal,
           gap: 0,
           gapValue: 0,
           minStock: curr.minStock,
@@ -1307,10 +1037,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
 
     // Save into periodicInventories[nextPeriod]
-    setPeriodicInventories((prev) => ({
-      ...prev,
-      [nextPeriod]: nextMonthItems,
-    }));
+    setPeriodicInventories((prev) => {
+      const nextBySku = new Map((prev[nextPeriod] ?? []).map((item) => [item.sku, item]));
+      for (const opening of nextMonthItems) {
+        const existing = nextBySku.get(opening.sku);
+        nextBySku.set(opening.sku, existing ? normalizeInventoryItem({
+          ...existing,
+          beginningInventory: opening.beginningInventory,
+          beginningValue: opening.beginningValue,
+        }, nextPeriod) : opening);
+      }
+      return { ...prev, [nextPeriod]: [...nextBySku.values()] };
+    });
 
     // Mark current SO report as Finalized
     setStockOpnameReports((prev) =>
@@ -1369,82 +1107,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
     return Array.from(map.values());
   };
-
-  // Automatically keep outletOrders items synced with Master Inventory (Category & Price Budget) by SKU
-  useEffect(() => {
-    const masterList = getCombinedMasterInventory();
-    if (masterList.length === 0) return;
-
-    setOutletOrders((prev) => {
-      let hasAnyChange = false;
-      const nextOrders = prev.map((ord) => {
-        let orderChanged = false;
-        const syncedItems = ord.items.map((item) => {
-          const matched = findInventoryItemBySku(item.sku, item.itemName, masterList);
-          if (!matched) return item;
-
-          const masterCategory = matched.category;
-          const masterPriceBudget =
-            matched.priceBudget !== undefined && matched.priceBudget > 0
-              ? matched.priceBudget
-              : matched.price ?? item.price;
-          const expectedSubtotal = item.qty * masterPriceBudget;
-
-          if (
-            item.category !== masterCategory ||
-            item.price !== masterPriceBudget ||
-            item.subtotal !== expectedSubtotal ||
-            item.sku !== matched.sku
-          ) {
-            orderChanged = true;
-            return {
-              ...item,
-              sku: matched.sku,
-              itemName: item.itemName || matched.itemName,
-              unit: item.unit || matched.unit,
-              category: masterCategory,
-              price: masterPriceBudget,
-              subtotal: expectedSubtotal,
-            };
-          }
-          return item;
-        });
-
-        if (!orderChanged) return ord;
-        hasAnyChange = true;
-        const newTotalAmount = syncedItems.reduce((sum, it) => sum + it.subtotal, 0);
-        return {
-          ...ord,
-          items: syncedItems,
-          totalAmount: newTotalAmount,
-        };
-      });
-
-      return hasAnyChange ? nextOrders : prev;
-    });
-  }, [inventory, periodicInventories, selectedPeriod]);
-
-  // One-time migration: ensure un-managed Submitted/Draft/PO Generated orders start with empty qtyPrepared
-  useEffect(() => {
-    const MIGRATION_KEY = '1010group_orders_empty_prep_v1';
-    if (typeof window !== 'undefined' && !localStorage.getItem(MIGRATION_KEY)) {
-      localStorage.setItem(MIGRATION_KEY, '1');
-      setOutletOrders((prev) =>
-        prev.map((ord) => {
-          const isUnmanaged =
-            ord.status === 'Submitted' || ord.status === 'Draft' || ord.status === 'PO Generated';
-          if (!isUnmanaged) return ord;
-          return {
-            ...ord,
-            items: ord.items.map((it) => ({
-              ...it,
-              qtyPrepared: undefined,
-            })),
-          };
-        })
-      );
-    }
-  }, []);
 
   // Outlet Orders
   const createOutletOrder = (orderData: Omit<OutletOrder, 'createdAt' | 'updatedAt'>) => {
@@ -1650,7 +1312,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               it.sku === newItem.sku
                 ? {
                     ...it,
-                    qty: it.qty + newItem.qty,
+                    qty: roundQuantity(it.qty + newItem.qty),
                     subtotal: (it.qty + newItem.qty) * it.price,
                   }
                 : it
@@ -1698,13 +1360,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, message: 'Pilih setidaknya 1 form order outlet untuk digenerate.' };
     }
 
-    const selectedOrders = outletOrders.filter((o) => sourceOrderIds.includes(o.id));
-    if (selectedOrders.length === 0) {
+    const selectedOrders = outletOrders.filter((o) => sourceOrderIds.includes(o.id) && o.status === 'Submitted' && !o.poId);
+    if (selectedOrders.length !== new Set(sourceOrderIds).size) {
       return { success: false, message: 'Form order tidak ditemukan.' };
     }
 
-    const todayStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    const poNumber = `PO-${todayStr}-${String(purchaseOrders.length + 1).padStart(3, '0')}`;
+    const todayStr = jakartaDate().replace(/-/g, '');
+    const poNumber = `PO-${todayStr}-${crypto.randomUUID().slice(0, 8).toUpperCase()}`;
 
     // Merge items by SKU across all selected orders.
     // Jika item dipesan lebih dari 1 outlet, item tersebut ditotal dan di-merge dengan rincian pemesanan masing-masing outlet.
@@ -1747,14 +1409,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
 
         const entry = itemsMap.get(item.sku)!;
-        entry.totalQty += item.qty;
+        entry.totalQty = roundQuantity(entry.totalQty + item.qty);
 
         // Cari apakah outlet & department ini sudah tercatat dalam breakdown
         const existingBd = entry.breakdowns.find(
           (b) => b.outletName === order.outletName && b.department === order.department
         );
         if (existingBd) {
-          existingBd.qty += item.qty;
+          existingBd.qty = roundQuantity(existingBd.qty + item.qty);
         } else {
           entry.breakdowns.push({
             outletName: order.outletName,
@@ -1774,7 +1436,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // Konsolidasi total qty per outlet (hanya outlet & kuantitas, tanpa PIC)
       const outletTotalsMap = new Map<string, number>();
       entry.breakdowns.forEach((b) => {
-        outletTotalsMap.set(b.outletName, (outletTotalsMap.get(b.outletName) || 0) + b.qty);
+        outletTotalsMap.set(b.outletName, roundQuantity((outletTotalsMap.get(b.outletName) || 0) + b.qty));
       });
 
       const distinctOutlets = Array.from(outletTotalsMap.keys());
@@ -1811,7 +1473,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         total: entry.totalQty * entry.price,
         place: placeStr,
         isMerged: isMultipleOutlets,
-        outletBreakdowns: consolidatedBreakdowns,
+        outletBreakdowns: entry.breakdowns,
         outletBreakdownText: breakdownText,
         vendorName: '',
         status: 'Pending' as const,
@@ -1822,7 +1484,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const newPO: PurchaseOrder = {
       id: poNumber,
-      generatedDate: new Date().toISOString().slice(0, 10),
+      generatedDate: jakartaDate(),
       sourceOrderIds,
       items: poItems,
       totalAmount,
@@ -1870,12 +1532,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const updatePO = (po: PurchaseOrder) => {
     const totalAmount = po.items.reduce((s, it) => s + it.total, 0);
     setPurchaseOrders((prev) =>
-      prev.map((p) => (p.id === po.id ? { ...po, totalAmount } : p))
+      prev.map((p) => (p.id === po.id ? revisePO(p, { ...po, totalAmount }) : p))
     );
   };
 
   const deletePO = (id: string) => {
+    const po = purchaseOrders.find((item) => item.id === id);
+    if (!po || !['Draft PO', 'Submitted to Purchasing', 'Vendor Summary'].includes(po.status)) return;
     setPurchaseOrders((prev) => prev.filter((p) => p.id !== id));
+    setOutletOrders((previous) => previous.map((order) => order.poId === id && order.status === 'PO Generated'
+      ? { ...order, poId: undefined, status: 'Submitted', updatedAt: new Date().toISOString() }
+      : order));
   };
 
   const submitPOToPurchasing = (poId: string) => {
@@ -1892,17 +1559,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
   };
 
-  const submitPOToVendor = (poId: string) => {
-    setPurchaseOrders((prev) =>
-      prev.map((p) => (p.id === poId ? { ...p, status: 'Submitted to Vendor' } : p))
-    );
-  };
+  const submitPOToVendor = (poId: string) => { submitPOVendorToReceiving(poId); };
 
   const submitPOToVendorSummary = (poId: string) => {
     const po = purchaseOrders.find((p) => p.id === poId);
     if (!po) return { success: false, message: 'PO tidak ditemukan.' };
 
-    const hasAnyVendor = po.items.some((it) => it.vendorName && it.vendorName.trim() !== '');
+    const hasAnyVendor = po.items.length > 0 && po.items.every((it) => it.vendorName?.trim());
     if (!hasAnyVendor) {
       return {
         success: false,
@@ -1947,8 +1610,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const batchSubmitPOToCostControl = (poIds: string[], notes?: string) => {
-    if (poIds.length === 0) {
-      return { success: false, count: 0, message: 'Pilih setidaknya satu form PO untuk diajukan.' };
+    const ready = purchaseOrders.filter((po) => poIds.includes(po.id) && po.status === 'Vendor Summary' &&
+      po.items.length > 0 && po.items.every((item) => item.vendorName?.trim()));
+    if (!ready.length || ready.length !== new Set(poIds).size) {
+      return { success: false, count: 0, message: 'Lengkapi vendor pada setiap baris sebelum mengirim ke Finance.' };
     }
 
     setPurchaseOrders((prev) =>
@@ -1957,6 +1622,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           return {
             ...p,
             status: 'Review Cost Control' as const,
+            costControlApproval: undefined,
+            items: p.items.map((line) => ({ ...line, approvalStatus: 'Pending' as const })),
             submittedToCostControlAt: new Date().toISOString(),
             submittedToCostControlBy: currentUser.username,
             notes: notes || p.notes,
@@ -1977,11 +1644,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const po = purchaseOrders.find((p) => p.id === poId);
     if (!po) return { success: false, message: 'PO tidak ditemukan.' };
 
-    const hasAnyVendor = po.items.some((it) => it.vendorName && it.vendorName.trim() !== '');
+    const hasAnyVendor = po.status === 'Vendor Summary' && po.items.length > 0 && po.items.every((it) => it.vendorName?.trim());
     if (!hasAnyVendor) {
       return {
         success: false,
-        message: 'Harap tentukan Nama Vendor / Supplier untuk setidaknya satu barang sebelum mengajukan ke Cost Control.',
+        message: 'Harap tentukan Nama Vendor / Supplier untuk setiap barang sebelum mengajukan ke Cost Control.',
       };
     }
 
@@ -1991,6 +1658,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           ? {
               ...p,
               status: 'Review Cost Control' as const,
+              costControlApproval: undefined,
+              items: p.items.map((line) => ({ ...line, approvalStatus: 'Pending' as const })),
               submittedToCostControlAt: new Date().toISOString(),
               submittedToCostControlBy: currentUser.username,
               notes: notes || p.notes,
@@ -2007,7 +1676,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const approvePOCostControl = (poId: string, approvalNotes?: string) => {
     const po = purchaseOrders.find((p) => p.id === poId);
-    if (!po) return { success: false, message: 'PO tidak ditemukan.' };
+    if (!po || po.status !== 'Review Cost Control' ||
+        !['Administrator', 'Cost Control'].includes(currentUser.position)) {
+      return { success: false, message: 'PO harus dalam review Finance dan Anda harus berwenang.' };
+    }
 
     const rejectedItems = po.items.filter((it) => it.approvalStatus === 'Rejected' || it.status === 'Rejected');
     if (rejectedItems.length > 0) {
@@ -2025,6 +1697,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
     }
 
+    if (!canApprovePO(po)) {
+      return { success: false, message: 'Lengkapi vendor, harga, dan persetujuan seluruh baris.' };
+    }
     const approvedItems = po.items.filter((it) => it.approvalStatus === 'Approved');
     const totalApproved = approvedItems.reduce((acc, it) => acc + (it.qty * it.price), 0);
 
@@ -2043,6 +1718,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 approvedBy: currentUser.username,
                 approvedAt: new Date().toISOString(),
                 totalApprovedAmount: totalApproved,
+                terms: purchaseTerms(po),
                 notes: approvalNotes || 'Total pengajuan pembelian telah disetujui oleh Cost Control.',
                 status: 'Approved',
               },
@@ -2073,7 +1749,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const rejectPOCostControl = (poId: string, reason: string) => {
     const po = purchaseOrders.find((p) => p.id === poId);
-    if (!po) return { success: false, message: 'PO tidak ditemukan.' };
+    if (!po || po.status !== 'Review Cost Control' ||
+        !['Administrator', 'Cost Control'].includes(currentUser.position)) {
+      return { success: false, message: 'PO harus dalam review Finance dan Anda harus berwenang.' };
+    }
 
     // Count rejected items
     const rejectedCount = po.items.filter((it) => it.approvalStatus === 'Rejected' || it.status === 'Rejected').length;
@@ -2129,7 +1808,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const returnPOToVendorSummary = (poId: string, notes?: string) => {
     const po = purchaseOrders.find((p) => p.id === poId);
-    if (!po) return { success: false, message: 'PO tidak ditemukan.' };
+    if (!po || po.status !== 'Review Cost Control' ||
+        !['Administrator', 'Cost Control'].includes(currentUser.position)) {
+      return { success: false, message: 'PO harus dalam review Finance dan Anda harus berwenang.' };
+    }
 
     const rejectedCount = po.items.filter((it) => it.approvalStatus === 'Rejected' || it.status === 'Rejected').length;
 
@@ -2229,12 +1911,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // If the PO status was Rejected by Cost Control, transition back to Vendor Summary
         const newStatus = po.status === 'Rejected by Cost Control' ? 'Vendor Summary' : po.status;
 
-        return {
-          ...po,
-          items,
-          totalAmount,
-          status: newStatus,
-        };
+        return revisePO(po, { ...po, items, totalAmount, status: newStatus });
       })
     );
 
@@ -2246,7 +1923,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Vendor Management
   const addVendor = (vendorData: Omit<Vendor, 'id'>) => {
-    const id = `VND-${String(vendors.length + 1).padStart(3, '0')}`;
+    const id = 'VND-' + crypto.randomUUID();
     setVendors((prev) => [...prev, { ...vendorData, id }]);
   };
 
@@ -2298,7 +1975,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             (acc, it) => acc + (it.status === 'Rejected' ? 0 : it.total),
             0
           );
-          return { ...po, items, totalAmount };
+          return revisePO(po, { ...po, items, totalAmount });
         }
         return po;
       })
@@ -2330,7 +2007,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             }
             return it;
           });
-          return { ...po, items };
+          return revisePO(po, { ...po, items });
         }
         return po;
       })
@@ -2344,9 +2021,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     status: 'Approved' | 'Rejected',
     reason?: string
   ) => {
+    if (!['Administrator', 'Cost Control'].includes(currentUser.position)) return;
     setPurchaseOrders((prev) =>
       prev.map((po) => {
-        if (po.id === poId) {
+        if (po.id === poId && po.status === 'Review Cost Control') {
           const items = po.items.map((it) => {
             if (it.sku === sku && (!place || it.place === place)) {
               return {
@@ -2370,8 +2048,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   ) => {
     if (updates.length === 0) return;
 
+    if (!['Administrator', 'Cost Control'].includes(currentUser.position)) return;
     setPurchaseOrders((prev) =>
       prev.map((po) => {
+        if (po.status !== 'Review Cost Control') return po;
         const poUpdates = updates.filter((u) => u.poId === po.id);
         if (poUpdates.length === 0) return po;
 
@@ -2406,7 +2086,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             (acc, it) => acc + (it.status === 'Rejected' ? 0 : it.total),
             0
           );
-          return { ...po, items, totalAmount };
+          return revisePO(po, { ...po, items, totalAmount });
         }
         return po;
       })
@@ -2424,7 +2104,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
     }
 
-    if (po.status !== 'Approved by Cost Control' && po.status !== 'Submitted to Vendor') {
+    if (!canReleasePO(po)) {
       return {
         success: false,
         message: 'Form PO belum disetujui oleh Cost Control. Form harus mendapatkan persetujuan (approval) Cost Control terlebih dahulu sebelum dapat dilakukan Release to Vendor.',
@@ -2432,7 +2112,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     const approvedItems = po.items.filter(
-      (it) => it.status !== 'Rejected' && it.approvalStatus !== 'Rejected'
+      (it) => it.status !== 'Rejected' && it.approvalStatus === 'Approved'
     );
     if (approvedItems.length === 0) {
       return { success: false, message: 'Tidak ada item yang disetujui untuk dikirim ke Receiving.' };
@@ -2447,7 +2127,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
 
     const newReceivingRecords: InboundReceivingRecord[] = [];
-    const nowDateStr = new Date().toISOString().slice(0, 10);
+    const nowDateStr = jakartaDate();
     const nowIso = new Date().toISOString();
 
     itemsByVendor.forEach((items, vendorName) => {
@@ -2461,7 +2141,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         status: 'Menunggu Kedatangan',
         receivedBy: currentUser.username,
         notes: `Release to Vendor dari ${po.id} (Telah Disetujui Cost Control)`,
-        items: items.map((i) => ({
+        items: items.map((i, index) => ({
+          lineId: String(index),
           sku: i.sku,
           itemName: i.itemName,
           category: i.category,
@@ -2470,7 +2151,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           receivedQty: 0,
           pendingQty: i.qty,
           unitPrice: i.price,
-          totalPrice: i.total,
+          totalPrice: 0,
         })),
       });
     });
@@ -2527,7 +2208,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const batchReleasePOToVendor = (poIds: string[]) => {
     const targetPOs = purchaseOrders.filter(
-      (p) => poIds.includes(p.id) && p.status === 'Approved by Cost Control'
+      (p) => poIds.includes(p.id) && canReleasePO(p)
     );
 
     if (targetPOs.length === 0) {
@@ -2541,13 +2222,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     const newReceivingRecords: InboundReceivingRecord[] = [];
-    const nowDateStr = new Date().toISOString().slice(0, 10);
+    const nowDateStr = jakartaDate();
     const nowIso = new Date().toISOString();
     const vendorPurchaseDelta = new Map<string, number>();
 
     targetPOs.forEach((po) => {
       const approvedItems = po.items.filter(
-        (it) => it.status !== 'Rejected' && it.approvalStatus !== 'Rejected'
+        (it) => it.status !== 'Rejected' && it.approvalStatus === 'Approved'
       );
       const itemsByVendor = new Map<string, typeof approvedItems>();
       approvedItems.forEach((it) => {
@@ -2571,7 +2252,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           status: 'Menunggu Kedatangan',
           receivedBy: currentUser.username,
           notes: `Release to Vendor dari ${po.id} (Telah Disetujui Cost Control)`,
-          items: items.map((i) => ({
+          items: items.map((i, index) => ({
+          lineId: String(index),
             sku: i.sku,
             itemName: i.itemName,
             category: i.category,
@@ -2580,7 +2262,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             receivedQty: 0,
             pendingQty: i.qty,
             unitPrice: i.price,
-            totalPrice: i.total,
+            totalPrice: 0,
           })),
         });
       });
@@ -2636,168 +2318,73 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   };
 
-  const recordVendorEmailSent = (
-    poId: string,
-    entries: { vendorName: string; email: string; subject?: string }[]
-  ) => {
-    const nowIso = new Date().toISOString();
-    setPurchaseOrders((prev) =>
-      prev.map((p) => {
-        if (p.id !== poId) return p;
-        const existing = p.emailedVendors || [];
-        const updated = [...existing];
-        entries.forEach((entry) => {
-          const idx = updated.findIndex((e) => e.vendorName === entry.vendorName);
-          const newRecord = {
-            vendorName: entry.vendorName,
-            email: entry.email,
-            sentAt: nowIso,
-            sentBy: currentUser.username,
-            subject: entry.subject,
-          };
-          if (idx >= 0) {
-            updated[idx] = newRecord;
-          } else {
-            updated.push(newRecord);
-          }
-        });
-        return {
-          ...p,
-          emailedVendors: updated,
-        };
-      })
-    );
-  };
-
   // Inbound: Receive Goods ("Terima Barang")
-  const receiveGoods = (
-    recordId: string,
-    receivedItems: { sku: string; qtyReceived: number; unitPrice?: number }[],
-    notes?: string
-  ) => {
-    const targetRec = receivingRecords.find((r) => r.id === recordId);
-    const changeDetails: AuditChangeItem[] = [];
-
-    setReceivingRecords((prev) =>
-      prev.map((rec) => {
-        if (rec.id === recordId) {
-          let allComplete = true;
-          let anyReceived = false;
-
-          const updatedItems = rec.items.map((it) => {
-            const match = receivedItems.find((r) => r.sku === it.sku);
-            if (match && match.qtyReceived > 0) {
-              anyReceived = true;
-              const newReceivedQty = it.receivedQty + match.qtyReceived;
-              const pending = Math.max(0, it.orderedQty - newReceivedQty);
-              if (pending > 0) allComplete = false;
-
-              const invMatch = inventory.find((inv) => inv.sku === it.sku);
-              const effectiveUnitPrice =
-                match.unitPrice !== undefined && match.unitPrice > 0
-                  ? match.unitPrice
-                  : it.unitPrice !== undefined && it.unitPrice > 0
-                  ? it.unitPrice
-                  : invMatch?.priceBudget || invMatch?.price || 0;
-
-              changeDetails.push({
-                field: `${it.itemName} (${it.sku})`,
-                before: `Diterima: ${it.receivedQty}/${it.orderedQty} ${it.unit}`,
-                after: `Diterima: ${newReceivedQty}/${it.orderedQty} ${it.unit} (+${match.qtyReceived} ${it.unit} @ ${formatRupiah(effectiveUnitPrice)})`,
-              });
-
-              // Adjust Inbound in Master Inventory with accumulated & averaged priceActual
-              adjustInventoryBalance(it.sku, match.qtyReceived, 0, effectiveUnitPrice);
-
-              return {
-                ...it,
-                receivedQty: newReceivedQty,
-                pendingQty: pending,
-                unitPrice: effectiveUnitPrice,
-                totalPrice: effectiveUnitPrice * newReceivedQty,
-              };
-            }
-            if (it.pendingQty > 0) allComplete = false;
-            return it;
-          });
-
-          const newStatus = allComplete
-            ? 'Diterima Keseluruhan'
-            : anyReceived
-            ? 'Diterima Sebagian'
-            : rec.status;
-
-          return {
-            ...rec,
-            items: updatedItems,
-            status: newStatus,
-            receivedBy: currentUser.username,
-            notes: notes || rec.notes,
-          };
-        }
-        return rec;
-      })
-    );
-
-    if (targetRec) {
+  const receiveGoods = (recordId: string, entries: ReceiptEntry[], notes?: string) => {
+    const record = receivingRecords.find((r) => r.id === recordId);
+    if (!record) return { success: false, message: 'Dokumen penerimaan tidak ditemukan.' };
+    try {
+      if (!['Administrator', 'Storage Inbound'].includes(currentUser.position)) {
+        throw new Error('Akses penerimaan ditolak.');
+      }
+      const { items, movements } = calculateReceipt(record, entries);
+      const date = jakartaDate();
+      const period = date.slice(0, 7);
+      if (stockOpnameReports.some((report) => report.period === period &&
+          ['Disetujui', 'Finalized (Generated)'].includes(report.status))) {
+        throw new Error('Periode stok ditutup untuk penerimaan.');
+      }
+      if (movements.some((movement) => !periodicInventories[period]?.some((item) => item.sku === movement.sku))) {
+        throw new Error('Tambahkan seluruh SKU ke Master Inventory pada periode transaksi.');
+      }
+      movements.forEach((movement) => adjustInventoryBalance(
+        movement.sku, movement.quantity, 0, movement.unitPrice, period,
+      ));
+      setReceivingRecords((previous) => previous.map((item) => item.id === recordId ? {
+        ...item, items, receiveDate: date,
+        status: items.every((line) => line.pendingQty === 0) ? 'Diterima Keseluruhan' : 'Diterima Sebagian',
+        receivedBy: currentUser.username, notes: notes || item.notes,
+      } : item));
       addAuditLog({
-        module: 'Inbound',
-        category: 'Stock Adjustment',
-        action: 'Penerimaan Fisik Barang Masuk (Inbound Receiving)',
-        referenceId: recordId,
-        department: 'Central Warehouse',
-        severity: 'Success',
-        description: `Mencatat penerimaan fisik barang masuk untuk dokumen ${recordId} dari mitra ${targetRec.vendorName} (Ref PO: ${targetRec.poVendorId}) dan memperbarui stok serta akumulasi rata-rata Price Actual di Master Inventory.`,
-        changes: changeDetails,
+        module: 'Inbound', category: 'Stock Adjustment', action: 'Penerimaan Fisik Barang',
+        referenceId: recordId, description: 'Penerimaan terhadap ' + record.poVendorId,
+        changes: movements.map((movement) => ({
+          field: movement.sku,
+          after: '+' + movement.quantity + ' @ ' + formatRupiah(movement.unitPrice),
+        })),
       });
+      return { success: true, message: 'Penerimaan tercatat.' };
+    } catch (error) {
+      return { success: false, message: error instanceof Error ? error.message : 'Penerimaan gagal.' };
     }
   };
 
   const deleteReceivingRecord = (id: string) => {
-    const targetRec = receivingRecords.find((r) => r.id === id);
-    setReceivingRecords((prev) => {
-      const record = prev.find((r) => r.id === id);
-      if (record) {
-        // Kembalikan inbound balance di Master Inventory jika barang sudah diterima
-        record.items.forEach((it) => {
-          if (it.receivedQty > 0) {
-            adjustInventoryBalance(it.sku, -it.receivedQty, 0, it.unitPrice);
-          }
-        });
-      }
-      return prev.filter((r) => r.id !== id);
-    });
-
-    if (targetRec) {
-      addAuditLog({
-        module: 'Inbound',
-        category: 'Stock Adjustment',
-        action: 'Penghapusan Dokumen Inbound & Rollback Stok',
-        referenceId: id,
-        department: 'Central Warehouse',
-        severity: 'Critical',
-        description: `Menghapus dokumen penerimaan ${id} (${targetRec.vendorName}) dan mengembalikan saldo stok Inbound yang terkait.`,
-        changes: [
-          { field: 'Dokumen Inbound', before: `${id} (${targetRec.status})`, after: 'Dihapus Permanen' },
-        ],
-      });
-    }
+    const record = receivingRecords.find((r) => r.id === id);
+    if (!record) return;
+    window.alert('Dokumen penerimaan PO dipertahankan. Gunakan koreksi stok untuk penyesuaian.');
   };
 
   // Inbound: Manual Incoming Goods
   const addManualInbound = (recordData: Omit<ManualInboundRecord, 'id' | 'date'> & { date?: string }) => {
-    const id = `INC-${Date.now()}`;
+    const id = 'INC-' + crypto.randomUUID();
+    const period = (recordData.date || jakartaDate()).slice(0, 7);
+    if (!Number.isFinite(recordData.qty) || recordData.qty <= 0 ||
+        !periodicInventories[period]?.some((item) => item.sku === recordData.sku) ||
+        stockOpnameReports.some((report) => report.period === period &&
+          ['Disetujui', 'Finalized (Generated)'].includes(report.status))) {
+      return { success: false, message: 'Periksa kuantitas, SKU, dan periode transaksi.' };
+    }
     const newRecord: ManualInboundRecord = {
       ...recordData,
       id,
-      date: recordData.date || new Date().toISOString().slice(0, 10),
+      date: recordData.date || jakartaDate(),
       totalPrice: recordData.price !== undefined ? recordData.price * recordData.qty : undefined,
     };
 
     setManualInboundRecords((prev) => [newRecord, ...prev]);
 
     // Live update Master Inventory inbound balance and accumulate/average priceActual
-    adjustInventoryBalance(recordData.sku, recordData.qty, 0, recordData.price);
+    adjustInventoryBalance(recordData.sku, recordData.qty, 0, recordData.price, newRecord.date.slice(0, 7));
 
     addAuditLog({
       module: 'Inbound',
@@ -2811,18 +2398,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         { field: `Inbound (${recordData.sku})`, before: 'Stok Sebelumnya', after: `+${recordData.qty} ${recordData.unit}` },
       ],
     });
+    return { success: true, message: '' };
   };
 
   const deleteManualInbound = (id: string) => {
     const targetRec = manualInboundRecords.find((r) => r.id === id);
-    setManualInboundRecords((prev) => {
-      const record = prev.find((r) => r.id === id);
-      if (record) {
-        // Kembalikan stok inbound jika transaksi manual dihapus
-        adjustInventoryBalance(record.sku, -record.qty, 0, record.price);
-      }
-      return prev.filter((r) => r.id !== id);
-    });
+    if (!targetRec) return;
+    const record = targetRec;
+    adjustInventoryBalance(record.sku, -record.qty, 0, record.price, record.date.slice(0, 7));
+    setManualInboundRecords((prev) => prev.filter((entry) => entry.id !== id));
 
     if (targetRec) {
       addAuditLog({
@@ -2839,17 +2423,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Outbond: Manual Outcoming Goods
   const addManualOutbond = (recordData: Omit<ManualOutbondRecord, 'id' | 'date'> & { date?: string }) => {
-    const id = `OUT-${Date.now()}`;
+    const id = 'OUT-' + crypto.randomUUID();
+    const period = (recordData.date || jakartaDate()).slice(0, 7);
+    const item = periodicInventories[period]?.find((row) => row.sku === recordData.sku);
+    if (!Number.isFinite(recordData.qty) || recordData.qty <= 0 || !item ||
+        recordData.qty > item.endingInventory ||
+        stockOpnameReports.some((report) => report.period === period &&
+          ['Disetujui', 'Finalized (Generated)'].includes(report.status))) {
+      return { success: false, message: 'Periksa kuantitas, saldo stok, dan periode transaksi.' };
+    }
     const newRecord: ManualOutbondRecord = {
       ...recordData,
       id,
-      date: recordData.date || new Date().toISOString().slice(0, 10),
+      date: recordData.date || jakartaDate(),
     };
 
     setManualOutbondRecords((prev) => [newRecord, ...prev]);
 
     // Live update Master Inventory outbond balance
-    adjustInventoryBalance(recordData.sku, 0, recordData.qty);
+    adjustInventoryBalance(recordData.sku, 0, recordData.qty, undefined, newRecord.date.slice(0, 7));
 
     addAuditLog({
       module: 'Outbond',
@@ -2864,18 +2456,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         { field: `Outbond (${recordData.sku})`, before: 'Stok Sebelumnya', after: `-${recordData.qty} ${recordData.unit} (${recordData.destination})` },
       ],
     });
+    return { success: true, message: '' };
   };
 
   const deleteManualOutbond = (id: string) => {
     const targetRec = manualOutbondRecords.find((r) => r.id === id);
-    setManualOutbondRecords((prev) => {
-      const record = prev.find((r) => r.id === id);
-      if (record) {
-        // Kembalikan stok outbond jika transaksi manual dihapus
-        adjustInventoryBalance(record.sku, 0, -record.qty);
-      }
-      return prev.filter((r) => r.id !== id);
-    });
+    if (!targetRec) return;
+    const record = targetRec;
+    adjustInventoryBalance(record.sku, 0, -record.qty, undefined, record.date.slice(0, 7));
+    setManualOutbondRecords((prev) => prev.filter((entry) => entry.id !== id));
 
     if (targetRec) {
       addAuditLog({
@@ -2908,6 +2497,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!order) return { success: false, message: 'Form PO tidak ditemukan.' };
 
     const itemsToSave = updatedItems || order.items;
+    if (itemsToSave.some((item) => !Number.isFinite(item.qty) || item.qty <= 0 ||
+        !Number.isFinite(item.qtyPrepared ?? 0) || (item.qtyPrepared ?? 0) < 0 ||
+        (item.qtyPrepared ?? 0) > item.qty)) {
+      return { success: false, message: 'Kuantitas disiapkan harus antara nol dan kuantitas pesanan.' };
+    }
 
     // Filter barang yang telah disiapkan (qtyPrepared > 0)
     const preparedItems = itemsToSave.filter((it) => (it.qtyPrepared || 0) > 0);
@@ -2922,9 +2516,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     // Hitung barang sisa / kekurangan (it.qty - qtyPrepared > 0)
     const remainingItems = itemsToSave
-      .filter((it) => it.qty - (it.qtyPrepared || 0) > 0)
+      .filter((it) => roundQuantity(it.qty - (it.qtyPrepared || 0)) > 0)
       .map((it) => {
-        const remainingQty = it.qty - (it.qtyPrepared || 0);
+        const remainingQty = roundQuantity(it.qty - (it.qtyPrepared || 0));
         return {
           ...it,
           qty: remainingQty,
@@ -3095,14 +2689,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const order = outletOrders.find((o) => o.id === orderId);
     if (!order) return { success: false, message: 'Form PO tidak ditemukan.' };
 
+    if (order.status !== 'PO Terkirim') {
+      return { success: false, message: 'Pengiriman belum disetujui atau sudah selesai.' };
+    }
+    const period = getCurrentPeriodKey();
+    const stock = periodicInventories[period] ?? EMPTY_INVENTORY;
+    if (stockOpnameReports.some((report) => report.period === period &&
+        ['Disetujui', 'Finalized (Generated)'].includes(report.status))) {
+      return { success: false, message: 'Periode stok ditutup untuk pengiriman.' };
+    }
     const itemsToShip = order.items.map((it) => ({
       sku: it.sku,
       qtyShipped: it.qtyPrepared !== undefined ? it.qtyPrepared : it.qty,
     }));
 
+    const totals = new Map<string, number>();
+    for (const item of itemsToShip) {
+      totals.set(item.sku, roundQuantity((totals.get(item.sku) ?? 0) + item.qtyShipped));
+    }
+    if (![...totals.values()].some((qty) => qty > 0) || itemsToShip.some((item) => !Number.isFinite(item.qtyShipped) || item.qtyShipped < 0) ||
+        [...totals].some(([sku, qty]) => qty > (stock.find((item) => item.sku === sku)?.endingInventory ?? 0))) {
+      return { success: false, message: 'Stok tersedia tidak mencukupi untuk pengiriman.' };
+    }
     // Potong stok dan catat ke Master Inventory pada kolom Outbond
     itemsToShip.forEach((s) => {
-      adjustInventoryBalance(s.sku, 0, s.qtyShipped);
+      adjustInventoryBalance(s.sku, 0, s.qtyShipped, undefined, period);
     });
 
     setOutletOrders((prev) =>
@@ -3145,70 +2756,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   };
 
-  const resetInventoryBalances = () => {
-    setInventory((prev) =>
-      prev.map((item) =>
-        normalizeInventoryItem(
-          {
-            ...item,
-            inbound: 0,
-            outbond: 0,
-            stockOpname: item.beginningInventory,
-          },
-          selectedPeriod
-        )
-      )
-    );
-  };
+  const resetInventoryBalances = () => window.alert('Gunakan koreksi stok untuk mengubah saldo.');
+  const clearAllForms = () => window.alert('Dokumen operasional tersimpan sebagai riwayat.');
+  const resetAllData = () => window.alert('Reset data bersama tidak tersedia.');
 
-  const clearAllForms = () => {
-    setOutletOrders([]);
-    setPurchaseOrders([]);
-    setReceivingRecords([]);
-    setManualInboundRecords([]);
-    setManualOutbondRecords([]);
-    setAuditLogs([]);
-    setVendors((prev) => prev.map((v) => ({ ...v, totalPurchase: 0 })));
-    resetInventoryBalances();
-    localStorage.setItem(STORAGE_KEYS.OUTLET_ORDERS, JSON.stringify([]));
-    localStorage.setItem(STORAGE_KEYS.PURCHASE_ORDERS, JSON.stringify([]));
-    localStorage.setItem(STORAGE_KEYS.RECEIVING, JSON.stringify([]));
-    localStorage.setItem(STORAGE_KEYS.MANUAL_INBOUND, JSON.stringify([]));
-    localStorage.setItem(STORAGE_KEYS.MANUAL_OUTBOND, JSON.stringify([]));
-    localStorage.setItem(STORAGE_KEYS.AUDIT_LOGS, JSON.stringify([]));
-  };
-
-  const resetAllData = () => {
-    localStorage.clear();
-    if (typeof window !== 'undefined') {
-      sessionStorage.removeItem(STORAGE_KEYS.AUTH_SESSION);
-    }
-    setIsAuthenticated(false);
-    setOutlets(INITIAL_OUTLETS);
-    setUsers(INITIAL_USERS);
-    setCurrentUser(INITIAL_USERS[0]);
-    const defaultPeriod = getCurrentPeriodKey();
-    const freshInventory: InventoryItem[] = [];
-    setInventory(freshInventory);
-    setPeriodicInventories({ [defaultPeriod]: freshInventory });
-    setStockOpnameReports([]);
-    setSelectedPeriodState(defaultPeriod);
-    setOutletOrders([]);
-    setPurchaseOrders([]);
-    setVendors(INITIAL_VENDORS);
-    setReceivingRecords([]);
-    setManualInboundRecords([]);
-    setManualOutbondRecords([]);
-  };
+  if (loadingSession || (isAuthenticated && !loaded && !saveError)) {
+    return <div role="status" className="p-8 text-center">Memuat data gudang…</div>;
+  }
 
   return (
     <AppContext.Provider
       value={{
         isAuthenticated,
         login,
-        loginWithGoogle,
-        loginAsUser,
         logout,
+        confirmPendingSave,
 
         outlets,
         addOutlet,
@@ -3216,7 +2778,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         deleteOutlet,
 
         currentUser,
-        setCurrentUser,
         users,
         addUser,
         updateUser,
@@ -3274,7 +2835,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         rejectPOItem,
         submitPOVendorToReceiving,
         batchReleasePOToVendor,
-        recordVendorEmailSent,
 
         receivingRecords,
         receiveGoods,
@@ -3304,6 +2864,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }}
     >
       {children}
+      {isAuthenticated && (saving || changes.length > 0 || saveError) && (
+        <div className="fixed inset-0 z-[9999] grid place-items-center bg-black/40" role="status">
+          <div className="max-w-md rounded-xl bg-white p-6 shadow-xl">
+            {saveError ? (
+              <>
+                <p className="font-semibold text-red-700">{saveError}</p>
+                <p className="mt-2 text-sm">Perubahan yang belum dikonfirmasi tidak tercatat sebagai transaksi selesai.</p>
+                <div className="mt-4 flex flex-wrap gap-3">
+                  {loaded && <button className="rounded bg-slate-100 px-3 py-2" onClick={() => setSaveError('')}>Coba Simpan Lagi</button>}
+                  <button className="rounded bg-slate-100 px-3 py-2" onClick={() => {
+                    if (!loaded || window.confirm('Buang perubahan belum tersimpan dan muat data server?')) {
+                      loadRecords().catch((error: Error) => setSaveError(error.message));
+                    }
+                  }}>Muat Data Server</button>
+                  <button className="rounded bg-slate-100 px-3 py-2" onClick={logout}>Keluar</button>
+                </div>
+              </>
+            ) : <p>Menyimpan ke database…</p>}
+          </div>
+        </div>
+      )}
     </AppContext.Provider>
   );
 };

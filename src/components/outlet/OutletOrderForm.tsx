@@ -40,6 +40,7 @@ export const OutletOrderForm: React.FC<OutletOrderFormProps> = ({
     currentUser,
     inventory,
     createOutletOrder,
+    confirmPendingSave,
     updateOutletOrder,
     deleteOutletOrder,
     outlets,
@@ -247,7 +248,7 @@ export const OutletOrderForm: React.FC<OutletOrderFormProps> = ({
   };
 
   // Submit / Save Form
-  const handleSubmitOrder = (status: 'Submitted' | 'Draft' = 'Submitted') => {
+  const handleSubmitOrder = async (status: 'Submitted' | 'Draft' = 'Submitted') => {
     if (!outletName || !department || !dateRequested) {
       setMessage({
         type: 'error',
@@ -302,6 +303,8 @@ export const OutletOrderForm: React.FC<OutletOrderFormProps> = ({
         return;
       }
     }
+
+    try { await confirmPendingSave(); } catch { return; }
 
     // 1. Tampilkan Pop-up Data Telah Berhasil Di-input
     setSuccessModalData({
@@ -667,12 +670,12 @@ export const OutletOrderForm: React.FC<OutletOrderFormProps> = ({
                                 -
                               </button>
                               <input
-                                type="number"
+                                type="number" step="0.001"
                                 min="0"
                                 value={currentQty > 0 ? currentQty : ''}
                                 placeholder="0"
                                 onChange={(e) => {
-                                  const val = parseInt(e.target.value) || 0;
+                                  const val = Number(e.target.value) || 0;
                                   handleSetItemQty(item, Math.max(0, val));
                                 }}
                                 className={`w-14 text-center py-1 px-1 font-bold text-xs rounded-md border focus:outline-hidden transition ${
@@ -903,10 +906,10 @@ export const OutletOrderForm: React.FC<OutletOrderFormProps> = ({
                     -
                   </button>
                   <input
-                    type="number"
-                    min="1"
+                    type="number" step="0.001"
+                    min="0.001"
                     value={editQty}
-                    onChange={(e) => setEditQty(Math.max(0, parseInt(e.target.value) || 0))}
+                    onChange={(e) => setEditQty(Math.max(0, Number(e.target.value) || 0))}
                     className="flex-1 text-center py-2 border border-slate-300 rounded-lg font-bold text-sm focus:ring-2 focus:ring-amber-500 outline-hidden"
                   />
                   <button
@@ -1016,12 +1019,12 @@ export const OutletOrderForm: React.FC<OutletOrderFormProps> = ({
                           -
                         </button>
                         <input
-                          type="number"
+                          type="number" step="0.001"
                           min="0"
                           value={currentQtyInForm > 0 ? currentQtyInForm : ''}
                           placeholder="0"
                           onChange={(e) => {
-                            const val = parseInt(e.target.value) || 0;
+                            const val = Number(e.target.value) || 0;
                             handleSetItemQty(item, Math.max(0, val));
                           }}
                           className={`w-12 text-center py-0.5 px-1 font-bold text-xs rounded-md border focus:outline-hidden ${

@@ -61,8 +61,22 @@ export function getPrevPeriod(periodKey: string): string {
 /**
  * Get current year-month string "YYYY-MM", defaults to "2026-10"
  */
+export function jakartaDate(date = new Date()): string {
+  return new Intl.DateTimeFormat('sv-SE', {
+    timeZone: 'Asia/Jakarta', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).format(date);
+}
+
+export function roundMoney(amount: number): number {
+  return Math.sign(amount) * Math.round((Math.abs(amount) + Number.EPSILON) * 100) / 100;
+}
+
+export function roundQuantity(quantity: number): number {
+  return Math.round(quantity * 1000) / 1000;
+}
+
 export function getCurrentPeriodKey(): string {
-  return '2026-10';
+  return jakartaDate().slice(0, 7);
 }
 
 /**
@@ -175,35 +189,30 @@ export function getNextQueuedSKU(
  */
 export function normalizeInventoryItem(
   item: Partial<InventoryItem>,
-  period: string = '2026-10'
+  period: string = getCurrentPeriodKey()
 ): InventoryItem {
   const priceBudget = item.priceBudget ?? item.price ?? 25000;
   const inbound = item.inbound ?? 0;
 
-  let priceActual = item.priceActual ?? item.price ?? priceBudget;
-  let inboundValue = Math.round(inbound * priceActual);
-
-  if (item.inboundValue !== undefined && inbound > 0 && item.inboundValue > 0) {
-    inboundValue = Math.round(item.inboundValue);
-    priceActual = Math.round(inboundValue / inbound);
-  }
+  const priceActual = item.priceActual ?? item.price ?? priceBudget;
+  const inboundValue = item.inboundValue ?? roundMoney(inbound * priceActual);
 
   const beginningInventory = item.beginningInventory ?? 0;
-  const beginningValue = Math.round(beginningInventory * priceBudget);
+  const beginningValue = item.beginningValue ?? roundMoney(beginningInventory * priceActual);
 
   const outbond = item.outbond ?? 0;
-  const outbondValue = Math.round(outbond * priceActual);
+  const outbondValue = item.outbondValue ?? roundMoney(outbond * priceActual);
 
-  const endingInventory = beginningInventory + inbound - outbond;
-  const endingValue = beginningValue + inboundValue - outbondValue;
+  const endingInventory = roundQuantity(beginningInventory + inbound - outbond);
+  const endingValue = roundMoney(beginningValue + inboundValue - outbondValue);
 
   const stockOpname = item.stockOpname ?? 0;
-  const soValue = Math.round(stockOpname * priceActual);
+  const soValue = item.soValue ?? roundMoney(stockOpname * priceActual);
 
   // GAP USAGE: SO Usage - Ending Inventory Usage (negative = deficit, positive = surplus)
   const gap = stockOpname - endingInventory;
   // GAP VALUE: Ending Inventory Value - SO Value (as specified: "ending inventory value dikurangi so value")
-  const gapValue = endingValue - soValue;
+  const gapValue = roundMoney(endingValue - soValue);
 
   return {
     sku: item.sku || `SKU-${Date.now().toString().slice(-4)}`,

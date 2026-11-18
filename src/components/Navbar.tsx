@@ -1,7 +1,6 @@
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
-import { User, UserPosition } from '../types';
-import { getDefaultTabForPosition } from '../utils/authUtils';
+import { UserPosition } from '../types';
 import {
   UtensilsCrossed,
   Layers,
@@ -31,8 +30,6 @@ interface NavbarProps {
 export const Navbar: React.FC<NavbarProps> = ({ activeTab, setActiveTab }) => {
   const {
     currentUser,
-    setCurrentUser,
-    users,
     canAccess,
     resetAllData,
     outletOrders,
@@ -40,11 +37,7 @@ export const Navbar: React.FC<NavbarProps> = ({ activeTab, setActiveTab }) => {
     purchaseOrders,
     logout,
   } = useApp();
-  const [showUserModal, setShowUserModal] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [loginUsername, setLoginUsername] = useState('');
-  const [loginPassword, setLoginPassword] = useState('');
-  const [loginError, setLoginError] = useState('');
 
   // Pending counts
   const pendingOutletOrders = outletOrders.filter(
@@ -131,30 +124,6 @@ export const Navbar: React.FC<NavbarProps> = ({ activeTab, setActiveTab }) => {
 
   const visibleNavItems = allNavItems.filter((item) => item.permissionCheck());
 
-  const handleQuickSwitch = (u: User) => {
-    setCurrentUser(u);
-    setShowUserModal(false);
-    const targetTab = getDefaultTabForPosition(u.position);
-    setActiveTab(targetTab);
-  };
-
-  const handleManualLogin = (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoginError('');
-    const matched = users.find(
-      (u) =>
-        u.username.toLowerCase() === loginUsername.trim().toLowerCase() &&
-        (u.password === loginPassword || !u.password)
-    );
-    if (matched) {
-      handleQuickSwitch(matched);
-      setLoginUsername('');
-      setLoginPassword('');
-    } else {
-      setLoginError('Username atau password tidak cocok! (Password default: password123)');
-    }
-  };
-
   const getPositionBadgeColor = (pos: UserPosition) => {
     switch (pos) {
       case 'Administrator':
@@ -206,9 +175,9 @@ export const Navbar: React.FC<NavbarProps> = ({ activeTab, setActiveTab }) => {
             <div className="flex items-center gap-2 sm:gap-3">
               {/* Quick switch button */}
               <button
-                onClick={() => setShowUserModal(true)}
+                onClick={() => setActiveTab('system-setting')}
                 className="flex items-center gap-2.5 px-3 py-1.5 rounded-xl border border-slate-200 hover:border-amber-400 bg-slate-50 hover:bg-white text-slate-700 transition cursor-pointer text-xs font-medium shadow-xs"
-                title="Ganti Pengguna / Role"
+                title="Profil pengguna"
               >
                 <div className="w-7 h-7 rounded-lg bg-amber-500 text-white flex items-center justify-center font-bold text-xs uppercase">
                   {currentUser.username.slice(0, 2)}
@@ -349,182 +318,7 @@ export const Navbar: React.FC<NavbarProps> = ({ activeTab, setActiveTab }) => {
       </header>
 
       {/* User Login & Switch Modal */}
-      {showUserModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full border border-slate-200 overflow-hidden flex flex-col max-h-[90vh]">
-            <div className="px-6 py-4 bg-gradient-to-r from-slate-900 to-slate-800 text-white flex items-center justify-between">
-              <div>
-                <h3 className="font-bold text-lg flex items-center gap-2">
-                  <UserCheck className="w-5 h-5 text-amber-400" />
-                  Simulasi Login & Ganti Pengguna
-                </h3>
-                <p className="text-xs text-slate-300 mt-0.5">
-                  Setiap posisi memiliki hak akses spesifik sesuai aturan sistem F&B 1010Group.
-                </p>
-              </div>
-              <button
-                onClick={() => setShowUserModal(false)}
-                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-700/50"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
 
-            <div className="p-6 overflow-y-auto space-y-6">
-              {/* Quick Switch Profiles (All users only visible to Administrator; non-admin only sees their own active account) */}
-              <div>
-                <div className="flex items-center justify-between mb-3">
-                  <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500">
-                    {currentUser.position === 'Administrator'
-                      ? 'Pilih Cepat Akun Demo (Preset Otentikasi)'
-                      : 'Informasi Akun Saya (Sedang Login)'}
-                  </h4>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowUserModal(false);
-                      setActiveTab('system-setting');
-                    }}
-                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-300 text-[11px] font-bold transition cursor-pointer"
-                  >
-                    <Settings className="w-3 h-3 text-amber-600" />
-                    <span>Ubah Data Pribadi & Password</span>
-                  </button>
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                  {(currentUser.position === 'Administrator'
-                    ? users
-                    : users.filter((u) => u.id === currentUser.id)
-                  ).map((u) => {
-                    const isSelected = u.id === currentUser.id;
-                    return (
-                      <button
-                        key={u.id}
-                        type="button"
-                        onClick={() => handleQuickSwitch(u)}
-                        className={`p-3 rounded-xl border text-left flex items-start justify-between transition cursor-pointer ${
-                          isSelected
-                            ? 'border-amber-500 bg-amber-50/50 ring-2 ring-amber-500/20'
-                            : 'border-slate-200 hover:border-slate-300 hover:bg-slate-50'
-                        }`}
-                      >
-                        <div className="flex-1 min-w-0 pr-2">
-                          <div className="flex items-center gap-1.5">
-                            <span className="font-semibold text-xs text-slate-900 truncate">
-                              {u.username}
-                            </span>
-                            {isSelected && (
-                              <span className="text-[10px] bg-amber-600 text-white px-1.5 py-0.2 rounded-full font-bold">
-                                Aktif
-                              </span>
-                            )}
-                          </div>
-                          <p className="text-[11px] text-slate-500 truncate mt-0.5">{u.email}</p>
-                          {u.outletName && (
-                            <p className="text-[10px] text-emerald-600 font-medium truncate mt-0.5">
-                              {u.outletName} • {u.department}
-                            </p>
-                          )}
-                        </div>
-                        <span
-                          className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border whitespace-nowrap ${getPositionBadgeColor(
-                            u.position
-                          )}`}
-                        >
-                          {u.position}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Position Access Rule Summary */}
-              <div className="bg-slate-50 rounded-xl p-3 border border-slate-200 text-[11px] text-slate-600 space-y-1">
-                <div className="font-bold text-slate-800 flex items-center gap-1.5">
-                  <ShieldCheck className="w-3.5 h-3.5 text-amber-600" />
-                  Matriks Hak Akses Posisi:
-                </div>
-                <ul className="list-disc list-inside space-y-0.5 pl-1 text-[11px]">
-                  <li><strong>Administrator:</strong> Akses penuh semua fitur & fungsi.</li>
-                  <li><strong>Outlet:</strong> Dashboard & Order barang ke gudang saja.</li>
-                  <li><strong>Storage-Mailer:</strong> Fitur Deployment saja.</li>
-                  <li><strong>Storage Inbound:</strong> Master Inventory, Inbound, & Purchase Request.</li>
-                  <li><strong>Storage Outbond:</strong> Master Inventory, Outbond, & Purchase Request.</li>
-                  <li><strong>Purchasing:</strong> Purchase Request, Vendor, & Inbound.</li>
-                  <li><strong>Cost Control:</strong> Master Inventory & Purchase Request.</li>
-                </ul>
-              </div>
-
-              {/* Login with username/password */}
-              <form onSubmit={handleManualLogin} className="pt-2 border-t border-slate-100 space-y-3">
-                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500">
-                  Atau Masuk dengan Kredensial
-                </h4>
-                {loginError && (
-                  <p className="text-xs text-red-600 bg-red-50 p-2 rounded-lg border border-red-200">
-                    {loginError}
-                  </p>
-                )}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs font-medium text-slate-700 mb-1">
-                      Username
-                    </label>
-                    <input
-                      type="text"
-                      value={loginUsername}
-                      onChange={(e) => setLoginUsername(e.target.value)}
-                      placeholder="e.g. admin atau chef.senopati"
-                      className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-xs focus:ring-2 focus:ring-amber-500 outline-hidden"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-slate-700 mb-1">
-                      Password
-                    </label>
-                    <input
-                      type="password"
-                      value={loginPassword}
-                      onChange={(e) => setLoginPassword(e.target.value)}
-                      placeholder="password123"
-                      className="w-full px-3 py-1.5 border border-slate-300 rounded-lg text-xs focus:ring-2 focus:ring-amber-500 outline-hidden"
-                    />
-                  </div>
-                </div>
-                <div className="flex items-center justify-between gap-2 pt-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowUserModal(false);
-                      logout();
-                    }}
-                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-rose-600 hover:text-rose-700 hover:bg-rose-50 border border-rose-200 rounded-lg font-semibold transition cursor-pointer"
-                  >
-                    <LogOut className="w-3.5 h-3.5" />
-                    <span>Keluar dari Sesi</span>
-                  </button>
-                  <div className="flex gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setShowUserModal(false)}
-                      className="px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100 rounded-lg"
-                    >
-                      Batal
-                    </button>
-                    <button
-                      type="submit"
-                      className="px-4 py-1.5 text-xs font-bold bg-amber-600 hover:bg-amber-700 text-white rounded-lg transition"
-                    >
-                      Login
-                    </button>
-                  </div>
-                </div>
-              </form>
-            </div>
-          </div>
-        </div>
-      )}
     </>
   );
 };

@@ -12,6 +12,8 @@ import { scrollToTop } from '../../utils/scrollHelper';
 import { SuccessSubmitModal, SuccessDetail } from '../common/SuccessSubmitModal';
 import {
   formatPeriodLabel,
+  getCurrentPeriodKey,
+  jakartaDate,
   MONTH_NAMES_ID,
   calculateInventoryManagementReport,
   getNextPeriod,
@@ -67,6 +69,7 @@ import {
 
 export const MasterInventory: React.FC = () => {
   const {
+    confirmPendingSave,
     inventory,
     selectedPeriod,
     setSelectedPeriod,
@@ -128,7 +131,7 @@ export const MasterInventory: React.FC = () => {
   };
 
   const handleCurrentMonth = () => {
-    setSelectedPeriod('2026-10');
+    setSelectedPeriod(getCurrentPeriodKey());
   };
 
   // Find active period's SO report
@@ -334,7 +337,7 @@ export const MasterInventory: React.FC = () => {
 
   // Modal: Start SO (Physical Count entry)
   const [showStartSOModal, setShowStartSOModal] = useState(false);
-  const [soFormDate, setSoFormDate] = useState<string>('2026-10-31');
+  const [soFormDate, setSoFormDate] = useState<string>(jakartaDate);
   const [soFormChecker, setSoFormChecker] = useState<string>(currentUser.username || 'storage.checker');
   const [soFormSupervisor, setSoFormSupervisor] = useState<string>('Admin Warehouse');
   const [soFormNotes, setSoFormNotes] = useState<string>('');
@@ -354,6 +357,9 @@ export const MasterInventory: React.FC = () => {
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [uploadParseResult, setUploadParseResult] = useState<SOParseResult | null>(null);
   const [isParsingUpload, setIsParsingUpload] = useState(false);
+  const completeUpload = !!uploadParseResult && uploadParseResult.invalidRows === 0 &&
+    uploadParseResult.missingSkus.length === 0;
+  const validUploadDate = soFormDate.slice(0, 7) === selectedPeriod && soFormDate <= jakartaDate();
   const [uploadError, setUploadError] = useState<string | null>(null);
 
   // Modal: Upload Master Inventory via Template
@@ -368,6 +374,8 @@ export const MasterInventory: React.FC = () => {
   const [showClearConfirmModal, setShowClearConfirmModal] = useState(false);
   const [clearScope, setClearScope] = useState<'current' | 'all'>('current');
   const [itemToDelete, setItemToDelete] = useState<InventoryItem | null>(null);
+
+  const [itemSaveError, setItemSaveError] = useState('');
 
   // Success Pop-up Modal state
   const [showSuccessModal, setShowSuccessModal] = useState<boolean>(false);
@@ -393,7 +401,7 @@ export const MasterInventory: React.FC = () => {
       };
     });
     setSoCounts(initialCounts);
-    setSoFormDate(`${selectedPeriod}-28`);
+    setSoFormDate(activePeriodSOReport?.conductedDate ?? (selectedPeriod === getCurrentPeriodKey() ? jakartaDate() : ''));
     setSoFormChecker(currentUser.username || 'Petugas Gudang');
     setSoFormNotes(activePeriodSOReport?.notes || `Pencatatan hitung fisik akhir bulan ${formatPeriodLabel(selectedPeriod)}`);
     setShowStartSOModal(true);
@@ -428,7 +436,7 @@ export const MasterInventory: React.FC = () => {
   };
 
   // Handler: Submit / Save SO Form
-  const handleSubmitSOForm = (submitForReview: boolean) => {
+  const handleSubmitSOForm = async (submitForReview: boolean) => {
     const itemsPayload = activeItems.map((it) => {
       const data = soCounts[it.sku] || { count: it.endingInventory, notes: '' };
       return {
@@ -447,7 +455,8 @@ export const MasterInventory: React.FC = () => {
       notes: soFormNotes,
       submitForReview,
     });
-
+    if (!res.success) { alert(res.message); return; }
+    try { await confirmPendingSave(); } catch { return; }
     setShowStartSOModal(false);
 
     setSuccessModalData({
@@ -495,61 +504,45 @@ export const MasterInventory: React.FC = () => {
   };
 
   const handleApplyUploadToStartSO = () => {
-    if (!uploadParseResult) return;
-    const newCounts: Record<string, { count: number; notes: string }> = {};
-    activeItems.forEach((it) => {
-      newCounts[it.sku] = {
-        count: 0,
-        notes: '',
-      };
-    });
-    uploadParseResult.rows.forEach((r) => {
-      if (r.isValid) {
-        newCounts[r.sku] = {
-          count: r.physicalCount,
-          notes: r.notes || '',
-        };
-      }
-    });
-    setSoCounts(newCounts);
+    if (!uploadParseResult || !completeUpload) return;
+    setSoCounts(Object.fromEntries(uploadParseResult.rows.map((row) => [
+      row.sku, { count: row.physicalCount, notes: row.notes },
+    ])));
     setShowUploadModal(false);
     setShowStartSOModal(true);
   };
 
-  const handleDirectSubmitFromUpload = (submitForReview: boolean) => {
-    if (!uploadParseResult) return;
-    const itemsPayload = activeItems.map((it) => {
-      const match = uploadParseResult.rows.find((r) => r.sku === it.sku);
-      return {
-        sku: it.sku,
-        physicalCount: match ? match.physicalCount : 0,
-        notes: match?.notes || '',
-      };
-    });
+  const handleDirectSubmitFromUpload = async () => {
+    if (!uploadParseResult || !completeUpload || !validUploadDate) return;
+    const itemsPayload = uploadParseResult.rows.map(({ sku, physicalCount, notes }) => ({
+      sku, physicalCount, notes,
+    }));
 
     const res = startStockOpname({
       period: selectedPeriod,
-      conductedDate: new Date().toISOString().slice(0, 10),
+      conductedDate: soFormDate,
       checkerName: currentUser.username || 'Petugas Upload SO',
       supervisorName: 'Admin Warehouse',
       items: itemsPayload,
       notes: `Diimport dari template file: ${uploadParseResult.fileName}`,
-      submitForReview,
+      submitForReview: true,
     });
+    if (!res.success) { alert(res.message); return; }
+    try { await confirmPendingSave(); } catch { return; }
 
     setShowUploadModal(false);
     setUploadParseResult(null);
     setUploadedFile(null);
 
     setSuccessModalData({
-      title: submitForReview ? 'Hasil SO Berhasil Diupload & Diajukan!' : 'Draft SO dari File Berhasil Disimpan!',
+      title: 'Hasil SO Berhasil Diupload & Diajukan!',
       message: res.message,
       details: [
         { label: 'File Sumber', value: uploadParseResult.fileName },
         { label: 'Periode', value: formatPeriodLabel(selectedPeriod) },
         { label: 'Item Cocok', value: `${uploadParseResult.matchedItemsCount} Item` },
         { label: 'Item Selisih Fisik', value: `${uploadParseResult.itemsWithVariance} Item` },
-        { label: 'Status Laporan', value: submitForReview ? 'Menunggu Review' : 'Draft' },
+        { label: 'Status Laporan', value: 'Menunggu Review' },
       ],
     });
     setShowSuccessModal(true);
@@ -585,13 +578,18 @@ export const MasterInventory: React.FC = () => {
     await processUploadedMasterFile(file);
   };
 
-  const handleApplyMasterInventoryUpload = () => {
+  const handleApplyMasterInventoryUpload = async () => {
     if (!uploadMasterParseResult || uploadMasterParseResult.validRows === 0) return;
     const res = bulkImportMasterInventory(
       uploadMasterParseResult.items,
       uploadImportMode === 'replace',
       selectedPeriod
     );
+    if (!res.success) { setUploadMasterError(res.message); return; }
+    try { await confirmPendingSave(); } catch (error) {
+      setUploadMasterError(error instanceof Error ? error.message : String(error));
+      return;
+    }
     setShowUploadMasterModal(false);
     setUploadedMasterFile(null);
     setUploadMasterParseResult(null);
@@ -610,8 +608,10 @@ export const MasterInventory: React.FC = () => {
     scrollToTop();
   };
 
-  const handleExecuteClearInventory = () => {
+  const handleExecuteClearInventory = async () => {
     const res = clearMasterInventory({ allPeriods: clearScope === 'all' });
+    if (!res.success) { alert(res.message); return; }
+    try { await confirmPendingSave(); } catch { return; }
     setShowClearConfirmModal(false);
     setSuccessModalData({
       title: 'Master Inventory Dikosongkan',
@@ -625,8 +625,9 @@ export const MasterInventory: React.FC = () => {
     scrollToTop();
   };
 
-  const handleExecuteDeleteItem = (item: InventoryItem) => {
+  const handleExecuteDeleteItem = async (item: InventoryItem) => {
     deleteInventoryItem(item.sku);
+    try { await confirmPendingSave(); } catch { return; }
     setItemToDelete(null);
     setSuccessModalData({
       title: 'Barang Berhasil Dihapus',
@@ -642,8 +643,10 @@ export const MasterInventory: React.FC = () => {
 
 
   // Handler: Approve Report SO
-  const handleApproveSO = (report: StockOpnameReport) => {
+  const handleApproveSO = async (report: StockOpnameReport) => {
     const res = approveStockOpnameReport(report.id, currentUser.username || 'Cost Control');
+    if (!res.success) { alert(res.message); return; }
+    try { await confirmPendingSave(); } catch { return; }
     setShowReviewSOModal(false);
 
     setSuccessModalData({
@@ -664,8 +667,10 @@ export const MasterInventory: React.FC = () => {
   };
 
   // Handler: Reject / Revision Report SO
-  const handleRejectSO = (report: StockOpnameReport) => {
+  const handleRejectSO = async (report: StockOpnameReport) => {
     const res = rejectStockOpnameReport(report.id, 'Perlu cek fisik ulang pada item yang memiliki selisih');
+    if (!res.success) { alert(res.message); return; }
+    try { await confirmPendingSave(); } catch { return; }
     setShowReviewSOModal(false);
 
     setSuccessModalData({
@@ -682,8 +687,10 @@ export const MasterInventory: React.FC = () => {
   };
 
   // Handler: Generate Final SO
-  const handleConfirmGenerateFinalSO = () => {
+  const handleConfirmGenerateFinalSO = async () => {
     const res = generateFinalSO(selectedPeriod, currentUser.username || 'Admin');
+    if (!res.success) { alert(res.message); return; }
+    try { await confirmPendingSave(); } catch { return; }
     setShowGenerateFinalModal(false);
 
     if (res.success) {
@@ -705,31 +712,34 @@ export const MasterInventory: React.FC = () => {
   };
 
   // Modal: Save Master Item
-  const handleSaveModalItem = (e: React.FormEvent) => {
+  const handleSaveModalItem = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!modalItemData.sku || !modalItemData.itemName) return;
+    const typedSku = modalItemData.sku?.trim();
+    const savedName = modalItemData.itemName?.trim();
+    if (!typedSku || !savedName) return;
+    const isEdit = isEditingExisting;
+    const savedSku = isEdit ? typedSku : typedSku.toUpperCase();
+    const current = inventory.find((item) => item.sku.toUpperCase() === savedSku.toUpperCase());
+    if (!isEdit && current) { setItemSaveError('SKU sudah terdaftar pada periode ini.'); return; }
+    if (isEdit && !current) { setItemSaveError('Item sudah berubah. Muat ulang data sebelum menyimpan.'); return; }
 
-    const savedSku = modalItemData.sku;
-    const savedName = modalItemData.itemName;
+    setItemSaveError('');
     const savedCategory = modalItemData.category || 'Dry Item';
     const savedUnit = modalItemData.unit || 'Kg';
     const budget = Number(modalItemData.priceBudget) || 0;
-    const actual = Number(modalItemData.priceActual) || budget;
-    const inboundQty = Number(modalItemData.inbound) || 0;
-    const isEdit = isEditingExisting;
-
+    const actual = current?.priceActual ?? Number(modalItemData.priceActual ?? budget);
     const normalized = normalizeInventoryItem({
-      ...modalItemData,
-      priceBudget: budget,
-      priceActual: actual,
-      inboundValue: Math.round(inboundQty * actual),
-      price: budget,
+      ...(current ?? { beginningInventory: 0, inbound: 0, outbond: 0, stockOpname: 0 }),
+      sku: savedSku, itemName: savedName, category: savedCategory, unit: savedUnit,
+      minStock: modalItemData.minStock, safetyStock: modalItemData.safetyStock,
+      allowedDepartments: modalItemData.allowedDepartments, vendor: modalItemData.vendor,
+      priceBudget: budget, priceActual: actual, price: budget,
     }, selectedPeriod);
-
-    if (isEditingExisting) {
-      updateInventoryItem(normalized);
-    } else {
-      addInventoryItem(normalized);
+    if (isEdit) updateInventoryItem(normalized);
+    else addInventoryItem(normalized);
+    try { await confirmPendingSave(); } catch (error) {
+      setItemSaveError(error instanceof Error ? error.message : String(error));
+      return;
     }
 
     setShowItemModal(false);
@@ -754,6 +764,7 @@ export const MasterInventory: React.FC = () => {
   };
 
   const handleOpenCreateModal = () => {
+    setItemSaveError('');
     setIsEditingExisting(false);
     const initialCategory: ItemCategory =
       selectedCategory !== 'All' ? (selectedCategory as ItemCategory) : 'Dry Item';
@@ -780,6 +791,7 @@ export const MasterInventory: React.FC = () => {
   };
 
   const handleOpenEditModal = (item: InventoryItem) => {
+    setItemSaveError('');
     setIsEditingExisting(true);
     setModalItemData({
       ...item,
@@ -1554,7 +1566,7 @@ export const MasterInventory: React.FC = () => {
 
                           <td
                             className="px-3 py-2 text-right font-mono text-slate-700 border-r border-slate-100 bg-slate-50/50"
-                            title="Harga Budget: Digunakan untuk Beginning Value, Purchase Request, dan Purchasing & Vendor"
+                            title="Harga Budget: Acuan Purchase Request, Purchasing & Vendor, dan pembukaan SKU baru"
                           >
                             <div className="flex flex-col items-end">
                               <span className="font-bold text-slate-800">
@@ -1567,7 +1579,7 @@ export const MasterInventory: React.FC = () => {
                           </td>
                           <td
                             className="px-3 py-2 text-right font-mono text-slate-700 border-r border-slate-100 bg-slate-50/50"
-                            title="Harga Actual: Diakumulasi & di-average dari harga masuk Inbound. Digunakan untuk Inbound Value & Outbond Value"
+                            title="Harga Actual: Biaya rata-rata tertimbang persediaan saat ini"
                           >
                             {(() => {
                               const budgetVal = item.priceBudget || item.price || 0;
@@ -1917,6 +1929,7 @@ export const MasterInventory: React.FC = () => {
                   setUploadedFile(null);
                   setUploadParseResult(null);
                   setUploadError(null);
+                  setSoFormDate(activePeriodSOReport?.conductedDate ?? (selectedPeriod === getCurrentPeriodKey() ? jakartaDate() : ''));
                   setShowUploadModal(true);
                 }}
                 className="px-4 py-2.5 bg-indigo-500 hover:bg-indigo-400 text-white font-bold text-xs rounded-xl transition shadow-xs flex items-center gap-1.5 cursor-pointer"
@@ -2137,16 +2150,16 @@ export const MasterInventory: React.FC = () => {
                   1. Penempatan Harga Budget (Acuan Standar)
                 </div>
                 <p className="text-slate-600 text-[11px] leading-relaxed">
-                  Digunakan untuk perhitungan <strong>Beginning Inventory Value</strong>, harga standar pada <strong>Purchase Request (PR & PO)</strong>, serta <strong>Purchasing & Vendor</strong>. Menjadi acuan dasar (benchmark) untuk mendeteksi anomali harga masuk.
+                  Digunakan sebagai harga standar pada <strong>Purchase Request (PR & PO)</strong> dan pembanding harga masuk. Pada pembukaan bulan berikutnya, nilai saldo awal mengikuti biaya persediaan saat penutupan bulan sebelumnya.
                 </p>
               </div>
               <div className="p-3.5 rounded-xl bg-emerald-50/60 border border-emerald-200 space-y-1">
                 <div className="font-extrabold text-emerald-900 flex items-center gap-1.5">
                   <RefreshCw className="w-4 h-4 text-emerald-600" />
-                  2. Penempatan Harga Actual (Akumulasi & Average Inbound)
+                  2. Harga Actual (Biaya Rata-Rata Tertimbang)
                 </div>
                 <p className="text-emerald-800 text-[11px] leading-relaxed">
-                  Digunakan untuk perhitungan <strong>Inbound Value</strong> dan <strong>Outbond Value</strong>. Setiap harga satuan yang di-input pada transaksi <strong>Inbound</strong> otomatis diakumulasi dan di-average (rata-rata tertimbang) ke dalam <strong>Harga Actual</strong>.
+                  Harga penerimaan menambah nilai persediaan. Setiap pengeluaran memakai <strong>Harga Actual</strong> saat transaksi dicatat.
                 </p>
               </div>
             </div>
@@ -2384,10 +2397,10 @@ export const MasterInventory: React.FC = () => {
               <div>
                 <h4 className="text-sm font-bold text-slate-900 flex items-center gap-2">
                   <BarChart3 className="w-4 h-4 text-amber-600" />
-                  Evaluasi Harga Actual (Average Inbound) vs Harga Budget pada Master Inventory
+                  Evaluasi Harga Actual vs Harga Budget pada Master Inventory
                 </h4>
                 <p className="text-xs text-slate-500">
-                  Perbandingan antara <strong>Harga Budget</strong> (acuan Beginning Value, Purchase Request, Purchasing & Vendor) dengan <strong>Harga Actual</strong> (hasil akumulasi & average Inbound yang digunakan untuk Inbound Value dan Outbond Value).
+                  Perbandingan antara <strong>Harga Budget</strong> dengan <strong>Harga Actual</strong> persediaan. Biaya barang keluar memakai rata-rata tertimbang pada saat transaksi dicatat.
                 </p>
               </div>
               <span className="px-2.5 py-1 rounded-full bg-slate-100 text-slate-700 border border-slate-200 text-[11px] font-bold self-start sm:self-center shrink-0">
@@ -2495,7 +2508,7 @@ export const MasterInventory: React.FC = () => {
                     <th className="px-3 py-2.5">Kategori & Unit</th>
                     <th className="px-3 py-2.5 text-right bg-slate-700">Harga Budget (Acuan)</th>
                     <th className="px-3 py-2.5 text-center bg-slate-700">Batas Bawah / Atas</th>
-                    <th className="px-3 py-2.5 text-right bg-emerald-900 text-emerald-100">Harga Actual (Avg Inbound)</th>
+                    <th className="px-3 py-2.5 text-right bg-emerald-900 text-emerald-100">Harga Actual</th>
                     <th className="px-3 py-2.5 text-right">Deviasi (Rp & %)</th>
                     <th className="px-3 py-2.5 text-right">Inbound Value (Actual)</th>
                     <th className="px-3 py-2.5 text-right">Outbond Value (Actual)</th>
@@ -2791,8 +2804,9 @@ export const MasterInventory: React.FC = () => {
                                 type="number"
                                 min="0"
                                 value={data.count}
+                                step="0.001"
                                 onChange={(e) => {
-                                  const val = parseInt(e.target.value, 10);
+                                  const val = Number(e.target.value);
                                   setSoCounts((prev) => ({
                                     ...prev,
                                     [item.sku]: {
@@ -3128,7 +3142,7 @@ export const MasterInventory: React.FC = () => {
                 </span>
               </div>
               <p className="text-[11px] text-slate-500 pt-1 border-t border-slate-200">
-                Fungsi ini akan mengubah hasil fisik SO akhir bulan <strong>{formatPeriodLabel(selectedPeriod)}</strong> menjadi <strong>Stock Beginning</strong> di bulan berikutnya (<strong>{formatPeriodLabel(getNextPeriod(selectedPeriod))}</strong>). Inbound & Outbond bulan berikutnya akan dimulai dari 0.
+                Fungsi ini akan mengubah hasil fisik SO akhir bulan <strong>{formatPeriodLabel(selectedPeriod)}</strong> menjadi <strong>Stock Beginning</strong> di bulan berikutnya (<strong>{formatPeriodLabel(getNextPeriod(selectedPeriod))}</strong>). Mutasi masuk dan keluar yang sudah tercatat pada bulan berikutnya tetap tersimpan.
               </p>
             </div>
 
@@ -3173,6 +3187,7 @@ export const MasterInventory: React.FC = () => {
               </button>
             </div>
 
+            {itemSaveError && <p role="alert" className="text-xs text-rose-700">{itemSaveError}</p>}
             <div className="grid grid-cols-2 gap-3 text-xs">
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">
@@ -3262,6 +3277,7 @@ export const MasterInventory: React.FC = () => {
                   type="text"
                   required
                   value={modalItemData.unit || ''}
+                  readOnly={isEditingExisting && !!(modalItemData.beginningInventory || modalItemData.inbound || modalItemData.outbond)}
                   onChange={(e) => setModalItemData({ ...modalItemData, unit: e.target.value })}
                   placeholder="Kg / Pack / Pcs / Botol"
                   className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-amber-500 outline-hidden"
@@ -3276,8 +3292,9 @@ export const MasterInventory: React.FC = () => {
                   type="number"
                   min="0"
                   value={modalItemData.safetyStock ?? modalItemData.minStock ?? 10}
+                  step="0.001"
                   onChange={(e) => {
-                    const val = parseInt(e.target.value, 10) || 0;
+                    const val = Number(e.target.value) || 0;
                     setModalItemData({ ...modalItemData, minStock: val, safetyStock: val });
                   }}
                   className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-amber-500 outline-hidden font-mono"
@@ -3306,7 +3323,7 @@ export const MasterInventory: React.FC = () => {
                   className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-amber-500 outline-hidden font-mono"
                 />
                 <span className="text-[10px] text-slate-400 mt-0.5 block">
-                  Digunakan untuk Beginning Value, Purchase Request, dan Purchasing & Vendor (serta acuan analisis anomali harga).
+                  Acuan Purchase Request, Purchasing & Vendor, dan analisis harga.
                 </span>
               </div>
 
@@ -3318,17 +3335,19 @@ export const MasterInventory: React.FC = () => {
                   type="number"
                   min="0"
                   required
-                  value={modalItemData.priceActual || ''}
+                  value={modalItemData.priceActual ?? ''}
+                  step="any"
+                  readOnly={isEditingExisting}
                   onChange={(e) =>
                     setModalItemData({
                       ...modalItemData,
-                      priceActual: parseInt(e.target.value, 10) || 0,
+                      priceActual: Number(e.target.value) || 0,
                     })
                   }
                   className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-amber-500 outline-hidden font-mono"
                 />
                 <span className="text-[10px] text-slate-400 mt-0.5 block">
-                  Digunakan untuk Inbound Value & Outbond Value (otomatis diakumulasi & di-average saat ada input harga di Inbound).
+                  Biaya rata-rata persediaan dihitung dari mutasi yang sudah tercatat.
                 </span>
               </div>
 
@@ -3578,6 +3597,14 @@ export const MasterInventory: React.FC = () => {
                     </div>
                   </div>
 
+                  {uploadParseResult.missingSkus.length > 0 && (
+                    <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-800 text-xs">
+                      Hasil hitung valid masih kurang untuk {uploadParseResult.missingSkus.length} SKU.
+                      {' '}{uploadParseResult.missingSkus.slice(0, 6).join(', ')}
+                      {uploadParseResult.missingSkus.length > 6 && ', …'}
+                    </div>
+                  )}
+
                   {/* Unmatched Warning if Any */}
                   {uploadParseResult.unmatchedItemsCount > 0 && (
                     <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-800 text-xs flex items-center gap-2">
@@ -3664,9 +3691,14 @@ export const MasterInventory: React.FC = () => {
 
             {/* Modal Actions */}
             <div className="p-4 bg-slate-50 border-t border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs">
-              <div className="text-slate-500">
-                Pilih opsi penerapan data hasil upload ke sistem.
-              </div>
+              <label className="flex items-center gap-2 font-semibold text-slate-700">
+                Tanggal hitung fisik
+                <input
+                  type="date" value={soFormDate} max={jakartaDate()}
+                  onChange={(event) => setSoFormDate(event.target.value)}
+                  className="px-2 py-1.5 rounded-lg border border-slate-300 bg-white"
+                />
+              </label>
 
               <div className="flex items-center gap-2 flex-wrap">
                 <button
@@ -3682,6 +3714,7 @@ export const MasterInventory: React.FC = () => {
                     <button
                       type="button"
                       onClick={handleApplyUploadToStartSO}
+                      disabled={!completeUpload}
                       className="px-4 py-2 font-bold text-indigo-700 bg-white border border-indigo-300 hover:bg-indigo-50 rounded-xl transition shadow-2xs cursor-pointer flex items-center gap-1.5"
                       title="Buka form Start SO dengan kuantitas yang telah diisi dari file untuk diperiksa lebih lanjut"
                     >
@@ -3691,7 +3724,8 @@ export const MasterInventory: React.FC = () => {
 
                     <button
                       type="button"
-                      onClick={() => handleDirectSubmitFromUpload(true)}
+                      onClick={handleDirectSubmitFromUpload}
+                      disabled={!completeUpload || !validUploadDate}
                       className="px-5 py-2 font-bold bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl shadow-xs transition flex items-center gap-1.5 cursor-pointer"
                       title="Langsung buat dokumen Report SO dan ajukan untuk peninjauan"
                     >

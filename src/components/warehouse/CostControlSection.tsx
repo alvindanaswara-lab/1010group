@@ -39,6 +39,7 @@ export const CostControlSection: React.FC = () => {
     purchaseOrders,
     vendors,
     approvePOCostControl,
+    confirmPendingSave,
     rejectPOCostControl,
     returnPOToVendorSummary,
     setItemApprovalStatus,
@@ -137,7 +138,7 @@ export const CostControlSection: React.FC = () => {
   const totalApprovedValue = approvedPOs.reduce((acc, p) => acc + p.totalAmount, 0);
 
   // Handle Confirm Approval
-  const handleConfirmApproval = () => {
+  const handleConfirmApproval = async () => {
     if (!approvingPO) return;
     const poId = approvingPO.id;
 
@@ -165,6 +166,7 @@ export const CostControlSection: React.FC = () => {
 
     const res = approvePOCostControl(poId, notesToSave);
     if (res.success) {
+      try { await confirmPendingSave(); } catch { return; }
       setSuccessModalData({
         title: 'Pengajuan Pembelian Berhasil Disetujui!',
         message: `Total pengajuan pembelian form ${poId} telah resmi disetujui oleh Cost Control (${currentUser.username}). Form PO Vendor kini telah terbuka untuk dilakukan submit to vendor.`,
@@ -186,13 +188,14 @@ export const CostControlSection: React.FC = () => {
   };
 
   // Handle Confirm Rejection
-  const handleConfirmRejection = () => {
+  const handleConfirmRejection = async () => {
     if (!rejectingPO) return;
     const poId = rejectingPO.id;
     const reason = rejectionReason || 'Harga satuan atau kuantitas memerlukan review ulang oleh purchasing.';
 
     const res = rejectPOCostControl(poId, reason);
     if (res.success) {
+      try { await confirmPendingSave(); } catch { return; }
       setSuccessModalData({
         title: 'Pengajuan Dikembalikan / Diminta Revisi',
         message: `Form ${poId} telah ditandai ditolak / diminta revisi. Tim Purchasing akan melihat catatan untuk penyesuaian.`,

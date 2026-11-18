@@ -40,7 +40,6 @@ export const SystemSettingSection: React.FC = () => {
     updateUser,
     deleteUser,
     currentUser,
-    setCurrentUser,
     resetAllData,
     clearAllForms,
     clearMasterInventory,
@@ -65,7 +64,7 @@ export const SystemSettingSection: React.FC = () => {
   }>({
     username: currentUser.username || '',
     email: currentUser.email || '',
-    password: currentUser.password || 'password123',
+    password: '',
     placement:
       currentUser.placement ||
       (currentUser.position !== 'Outlet'
@@ -75,7 +74,7 @@ export const SystemSettingSection: React.FC = () => {
     department: currentUser.department || 'Kitchen',
   });
 
-  const [showPersonalPassword, setShowPersonalPassword] = useState<boolean>(true);
+  const [showPersonalPassword] = useState<boolean>(false);
   const [isChangingPersonalPassword, setIsChangingPersonalPassword] = useState<boolean>(false);
   const [personalNewPassword, setPersonalNewPassword] = useState<string>('');
   const [personalConfirmPassword, setPersonalConfirmPassword] = useState<string>('');
@@ -86,7 +85,7 @@ export const SystemSettingSection: React.FC = () => {
     setPersonalForm({
       username: currentUser.username || '',
       email: currentUser.email || '',
-      password: currentUser.password || 'password123',
+      password: '',
       placement:
         currentUser.placement ||
         (currentUser.position !== 'Outlet'
@@ -126,7 +125,7 @@ export const SystemSettingSection: React.FC = () => {
   const [cpCurrentPasswordVisible, setCpCurrentPasswordVisible] = useState<boolean>(true);
   const [cpNewPassword, setCpNewPassword] = useState<string>('');
   const [cpConfirmPassword, setCpConfirmPassword] = useState<string>('');
-  const [cpShowNewPassword, setCpShowNewPassword] = useState<boolean>(true);
+  const [cpShowNewPassword, setCpShowNewPassword] = useState<boolean>(false);
   const [cpError, setCpError] = useState<string>('');
 
   // Outlet Control state
@@ -142,7 +141,7 @@ export const SystemSettingSection: React.FC = () => {
   // User Control form modal
   const [showUserModal, setShowUserModal] = useState<boolean>(false);
   const [isEditingUser, setIsEditingUser] = useState<boolean>(false);
-  const [showModalPassword, setShowModalPassword] = useState<boolean>(true);
+  const [showModalPassword, setShowModalPassword] = useState<boolean>(false);
   const [isChangingModalPassword, setIsChangingModalPassword] = useState<boolean>(false);
   const [modalNewPassword, setModalNewPassword] = useState<string>('');
   const [modalConfirmPassword, setModalConfirmPassword] = useState<string>('');
@@ -152,7 +151,7 @@ export const SystemSettingSection: React.FC = () => {
     username: '',
     position: 'Outlet',
     email: '',
-    password: 'password123',
+    password: '',
     access: ['Order Outlet'],
     outletName: outlets[0]?.namaOutlet || 'Resto Senopati',
     department: 'Kitchen',
@@ -310,7 +309,7 @@ export const SystemSettingSection: React.FC = () => {
   });
 
   // Save Personal User Profile Handler (for logged-in user)
-  const handleSavePersonalProfile = (e: React.FormEvent) => {
+  const handleSavePersonalProfile = async (e: React.FormEvent) => {
     e.preventDefault();
     setPersonalPasswordError('');
 
@@ -318,7 +317,7 @@ export const SystemSettingSection: React.FC = () => {
     const trimmedEmail = personalForm.email.trim();
     if (!trimmedUsername || !trimmedEmail) return;
 
-    let finalPassword = personalForm.password.trim() || currentUser.password || 'password123';
+    let finalPassword: string | undefined;
     if (isChangingPersonalPassword) {
       if (!personalNewPassword.trim()) {
         setPersonalPasswordError('Password baru tidak boleh kosong.');
@@ -333,10 +332,10 @@ export const SystemSettingSection: React.FC = () => {
 
     const isOutletRole = currentUser.position === 'Outlet';
     const finalPlacement = isOutletRole
-      ? personalForm.outletName || outlets[0]?.namaOutlet || 'Resto Senopati'
+      ? currentUser.outletName
       : 'Head Office/Warehouse';
     const finalOutletName = isOutletRole ? finalPlacement : undefined;
-    const finalDept = isOutletRole ? personalForm.department || 'Kitchen' : undefined;
+    const finalDept = isOutletRole ? currentUser.department : undefined;
 
     const updatedUser: User = {
       ...currentUser,
@@ -348,7 +347,7 @@ export const SystemSettingSection: React.FC = () => {
       department: finalDept,
     };
 
-    updateUser(updatedUser);
+    try { await updateUser(updatedUser); } catch (error) { setPersonalPasswordError(String(error)); return; }
 
     addAuditLog({
       module: 'System & Setting',
@@ -373,7 +372,7 @@ export const SystemSettingSection: React.FC = () => {
         { label: 'Username', value: updatedUser.username },
         { label: 'Jabatan / Posisi', value: updatedUser.position },
         { label: 'Email', value: updatedUser.email },
-        { label: 'Penempatan', value: finalPlacement },
+        { label: 'Penempatan', value: finalPlacement ?? '-' },
         { label: 'Departemen', value: finalDept || '-' },
         { label: 'Status Password', value: isChangingPersonalPassword ? 'Password Diperbarui' : 'Tersimpan' },
       ],
@@ -388,11 +387,11 @@ export const SystemSettingSection: React.FC = () => {
     setCpCurrentPasswordVisible(true);
     setCpNewPassword('');
     setCpConfirmPassword('');
-    setCpShowNewPassword(true);
+    setCpShowNewPassword(false);
     setCpError('');
   };
 
-  const handleSaveChangePasswordModal = (e: React.FormEvent) => {
+  const handleSaveChangePasswordModal = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!changePasswordTargetUser) return;
     setCpError('');
@@ -412,7 +411,7 @@ export const SystemSettingSection: React.FC = () => {
       password: trimmedNew,
     };
 
-    updateUser(updated);
+    try { await updateUser(updated); } catch (error) { setCpError(String(error)); return; }
 
     addAuditLog({
       module: 'System & Setting',
@@ -432,7 +431,6 @@ export const SystemSettingSection: React.FC = () => {
         { label: 'User ID', value: updated.id },
         { label: 'Username', value: updated.username },
         { label: 'Position', value: updated.position },
-        { label: 'Password Baru', value: trimmedNew },
       ],
     });
     setShowSuccessModal(true);
@@ -483,7 +481,7 @@ export const SystemSettingSection: React.FC = () => {
 
   const handleOpenAddUser = () => {
     setIsEditingUser(false);
-    setShowModalPassword(true);
+    setShowModalPassword(false);
     setIsChangingModalPassword(false);
     setModalNewPassword('');
     setModalConfirmPassword('');
@@ -492,7 +490,7 @@ export const SystemSettingSection: React.FC = () => {
       username: '',
       position: 'Outlet',
       email: '',
-      password: 'password123',
+      password: '',
       access: getPositionAccessList('Outlet'),
       placement: outlets[0]?.namaOutlet || 'Resto Senopati',
       outletName: outlets[0]?.namaOutlet || 'Resto Senopati',
@@ -503,7 +501,7 @@ export const SystemSettingSection: React.FC = () => {
 
   const handleOpenEditUser = (u: User) => {
     setIsEditingUser(true);
-    setShowModalPassword(true);
+    setShowModalPassword(false);
     setIsChangingModalPassword(false);
     setModalNewPassword('');
     setModalConfirmPassword('');
@@ -513,13 +511,13 @@ export const SystemSettingSection: React.FC = () => {
       (u.position !== 'Outlet' ? 'Head Office/Warehouse' : u.outletName || outlets[0]?.namaOutlet || 'Resto Senopati');
     setUserFormData({
       ...u,
-      password: u.password && u.password.trim() !== '' ? u.password : 'password123',
+      password: '',
       placement: initialPlacement,
     });
     setShowUserModal(true);
   };
 
-  const handleSaveUserForm = (e: React.FormEvent) => {
+  const handleSaveUserForm = async (e: React.FormEvent) => {
     e.preventDefault();
     setModalPasswordError('');
     if (!userFormData.username || !userFormData.email) return;
@@ -535,10 +533,9 @@ export const SystemSettingSection: React.FC = () => {
     const finalDept = isNonOutlet ? undefined : (userFormData.department || 'Kitchen');
     const isEdit = isEditingUser;
 
-    const existingUser = isEdit ? users.find((u) => u.id === (userFormData as User).id) : null;
     let finalPassword = userFormData.password?.trim()
       ? userFormData.password.trim()
-      : (existingUser?.password || 'password123');
+      : undefined;
 
     if (isChangingModalPassword) {
       if (!modalNewPassword.trim()) {
@@ -552,6 +549,10 @@ export const SystemSettingSection: React.FC = () => {
       finalPassword = modalNewPassword.trim();
     }
 
+    if (!isEdit && !finalPassword) {
+      setModalPasswordError('Masukkan password minimal 8 karakter.');
+      return;
+    }
     const payload: User = {
       ...(userFormData as User),
       username: uname,
@@ -563,13 +564,18 @@ export const SystemSettingSection: React.FC = () => {
       password: finalPassword,
     };
 
-    if (isEditingUser) {
-      updateUser(payload);
-    } else {
-      addUser(payload as Omit<User, 'id'>);
+    try {
+      if (isEditingUser) await updateUser(payload);
+      else await addUser(payload);
+    } catch (error) {
+      setModalPasswordError(String(error));
+      return;
     }
 
     setShowUserModal(false);
+    setUserFormData((previous) => ({ ...previous, password: '' }));
+    setModalNewPassword('');
+    setModalConfirmPassword('');
 
     // Pop-up sukses simpan user
     setSuccessModalData({
@@ -583,7 +589,6 @@ export const SystemSettingSection: React.FC = () => {
         { label: 'Penempatan User', value: finalPlacement },
         { label: 'Departemen', value: finalDept || '-' },
         { label: 'Email', value: email },
-        { label: 'Password', value: finalPassword },
         { label: 'Aksi', value: isEdit ? 'Update User' : 'User Baru' },
       ],
     });
@@ -842,6 +847,7 @@ export const SystemSettingSection: React.FC = () => {
                   <input
                     type="email"
                     required
+                    readOnly={!isAdmin}
                     value={personalForm.email}
                     onChange={(e) =>
                       setPersonalForm({ ...personalForm, email: e.target.value })
@@ -859,6 +865,7 @@ export const SystemSettingSection: React.FC = () => {
                   {currentUser.position === 'Outlet' ? (
                     <div className="grid grid-cols-2 gap-1.5">
                       <select
+                        disabled={!isAdmin}
                         value={personalForm.outletName}
                         onChange={(e) =>
                           setPersonalForm({
@@ -876,6 +883,7 @@ export const SystemSettingSection: React.FC = () => {
                         ))}
                       </select>
                       <select
+                        disabled={!isAdmin}
                         value={personalForm.department}
                         onChange={(e) =>
                           setPersonalForm({
@@ -900,54 +908,12 @@ export const SystemSettingSection: React.FC = () => {
                   )}
                 </div>
 
-                {/* Field Password Saat Ini (Sudah Terisi) + Pilihan Ganti Password */}
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <label className="font-bold text-slate-700 flex items-center gap-1">
-                      <Key className="w-3.5 h-3.5 text-amber-600" />
-                      Password Saat Ini
-                    </label>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsChangingPersonalPassword(!isChangingPersonalPassword);
-                        setPersonalPasswordError('');
-                      }}
-                      className={`text-[11px] font-bold px-2 py-0.5 rounded-lg border transition cursor-pointer flex items-center gap-1 ${
-                        isChangingPersonalPassword
-                          ? 'bg-amber-600 text-white border-amber-600'
-                          : 'bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-300'
-                      }`}
-                    >
-                      <Lock className="w-3 h-3" />
-                      <span>{isChangingPersonalPassword ? 'Batal Ganti' : 'Ganti Password'}</span>
-                    </button>
-                  </div>
-                  <div className="relative">
-                    <input
-                      type={showPersonalPassword ? 'text' : 'password'}
-                      value={personalForm.password}
-                      onChange={(e) =>
-                        setPersonalForm({ ...personalForm, password: e.target.value })
-                      }
-                      className="w-full pl-3 pr-9 py-2 bg-slate-50 focus:bg-white border border-slate-300 rounded-xl font-mono font-bold text-slate-900 focus:ring-2 focus:ring-amber-500 outline-hidden"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowPersonalPassword(!showPersonalPassword)}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 cursor-pointer"
-                      title={showPersonalPassword ? 'Sembunyikan Password' : 'Tampilkan Password'}
-                    >
-                      {showPersonalPassword ? (
-                        <EyeOff className="w-4 h-4" />
-                      ) : (
-                        <Eye className="w-4 h-4" />
-                      )}
-                    </button>
-                  </div>
-                </div>
+                  <button type="button" onClick={() => setIsChangingPersonalPassword(!isChangingPersonalPassword)}
+                  className="text-left font-bold text-amber-700">
+                  {isChangingPersonalPassword ? 'Batal Ganti Password' : 'Ganti Password'}
+                </button>
               </div>
-
+              {personalPasswordError && <p role="alert" className="text-red-700">{personalPasswordError}</p>}
               {/* Panel Pilihan Ganti Password Pribadi */}
               {isChangingPersonalPassword && (
                 <div className="p-4 rounded-xl bg-amber-50/70 border border-amber-200 space-y-3">
@@ -956,9 +922,6 @@ export const SystemSettingSection: React.FC = () => {
                       <Key className="w-4 h-4 text-amber-600" />
                       <span>Formulir Ganti Password Akun Pribadi ({currentUser.username})</span>
                     </div>
-                    <span className="text-[11px] text-amber-800">
-                      Password lama: <strong className="font-mono">{currentUser.password || 'password123'}</strong>
-                    </span>
                   </div>
 
                   {personalPasswordError && (
@@ -1067,7 +1030,7 @@ export const SystemSettingSection: React.FC = () => {
                     const isCurrent = u.id === currentUser.id;
                     const canManageThisUser = isAdmin || isCurrent;
                     const isNonOutletUser = u.position !== 'Outlet' || u.placement === 'Head Office/Warehouse';
-                    const filledPassword = u.password && u.password.trim() !== '' ? u.password : 'password123';
+                    const filledPassword = '';
                     const showPwd = isTablePasswordVisible(u.id);
 
                     return (
@@ -1107,7 +1070,7 @@ export const SystemSettingSection: React.FC = () => {
                                   readOnly
                                   value={filledPassword}
                                   className="w-full pl-2.5 pr-7 py-1 bg-slate-50 border border-slate-300 rounded-lg font-mono text-[11px] font-bold text-slate-800 outline-hidden"
-                                  title="Password saat ini (sudah terisi)"
+                                  title="Password"
                                 />
                                 <button
                                   type="button"
@@ -1173,15 +1136,7 @@ export const SystemSettingSection: React.FC = () => {
                         </td>
                         <td className="px-3 py-2.5 text-center">
                           <div className="flex items-center justify-center gap-1">
-                            {!isCurrent && isAdmin && (
-                              <button
-                                onClick={() => setCurrentUser(u)}
-                                className="px-2 py-1 bg-amber-50 hover:bg-amber-100 text-amber-800 text-[10px] font-bold rounded-md transition cursor-pointer"
-                                title="Beralih peran ke user ini"
-                              >
-                                Switch
-                              </button>
-                            )}
+                            
                             {canManageThisUser && (
                               <button
                                 onClick={() => handleOpenEditUser(u)}
@@ -1194,10 +1149,9 @@ export const SystemSettingSection: React.FC = () => {
                             )}
                             {isAdmin && users.length > 1 && !isCurrent && (
                               <button
-                                onClick={() => {
-                                  if (confirm(`Hapus pengguna ${u.username}?`)) {
-                                    deleteUser(u.id);
-                                  }
+                                onClick={async () => {
+                                  if (!confirm(`Hapus pengguna ${u.username}?`)) return;
+                                  try { await deleteUser(u.id); } catch (error) { alert(String(error)); }
                                 }}
                                 className="p-1 text-red-500 hover:text-red-700 hover:bg-red-50 rounded-md cursor-pointer"
                                 title="Hapus User"
@@ -1559,13 +1513,13 @@ export const SystemSettingSection: React.FC = () => {
             <div className="space-y-3 text-xs">
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">
-                  Password Saat Ini (Sudah Terisi)
+                  Password baru
                 </label>
                 <div className="relative">
                   <input
                     type={cpCurrentPasswordVisible ? 'text' : 'password'}
                     readOnly
-                    value={changePasswordTargetUser.password || 'password123'}
+                    value={''}
                     className="w-full pl-3 pr-9 py-2 bg-slate-100 border border-slate-300 rounded-lg font-mono font-bold text-slate-700 outline-hidden"
                   />
                   <button
@@ -1831,6 +1785,7 @@ export const SystemSettingSection: React.FC = () => {
               </div>
 
               {/* Pilihan Ganti Password di dalam Modal User */}
+              {modalPasswordError && <p role="alert" className="text-xs text-red-700">{modalPasswordError}</p>}
               {isChangingModalPassword && (
                 <div className="p-3.5 rounded-xl bg-amber-50/80 border border-amber-200 space-y-2.5">
                   <div className="font-bold text-amber-950 flex items-center gap-1.5">

@@ -174,6 +174,8 @@ export interface OutletOrder {
   dispatchedBy?: string;
   finalApprovedAt?: string;
   finalApprovedBy?: string;
+  postedStockCost?: number;
+  postedStockCosts?: Record<string, number>;
   isBackorder?: boolean; // True jika merupakan sisa order/credit dari pengiriman sebagian
   parentOrderId?: string; // Form ID pesanan asal
   isPartialShipment?: boolean; // True jika pengiriman ini adalah pengiriman sebagian/parsial
@@ -225,6 +227,7 @@ export type PurchaseOrderStatus =
   | 'Completed';
 
 export interface CostControlApproval {
+  terms?: string;
   approvedBy: string;
   approvedAt: string;
   totalApprovedAmount: number;
@@ -278,6 +281,7 @@ export interface InboundReceivingRecord {
   receiveDate: string;
   doNumber: string; // Surat Jalan / Delivery Order
   items: {
+    lineId?: string;
     sku: string;
     itemName: string;
     category: ItemCategory;

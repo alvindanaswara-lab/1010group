@@ -28,6 +28,9 @@ function buildPOPDFDocument(
   const filteredItems = specificVendorName
     ? approvedItems.filter((it) => (it.vendorName || 'Vendor Umum') === specificVendorName)
     : approvedItems;
+  if (specificVendorName && filteredItems.length === 0) {
+    throw new Error('Vendor tidak memiliki baris pada PO ini.');
+  }
 
   const targetVendor = specificVendorName
     ? vendors.find((v) => v.namaVendor === specificVendorName)
@@ -411,7 +414,8 @@ export function generateVendorPOEmailContent(
       it.status !== 'Rejected' &&
       it.approvalStatus !== 'Rejected'
   );
-  const itemsToUse = vendorItems.length > 0 ? vendorItems : po.items;
+  if (vendorItems.length === 0) throw new Error('Vendor tidak memiliki baris pada PO ini.');
+  const itemsToUse = vendorItems;
   const subtotal = itemsToUse.reduce((acc, it) => acc + it.qty * it.price, 0);
 
   const paymentMethod =

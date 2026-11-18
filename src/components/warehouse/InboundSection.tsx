@@ -1,3 +1,5 @@
+import { jakartaDate } from '../../utils/inventoryUtils';
+import { receiptLineId } from '../../utils/receiving';
 import React, { useState, useRef, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
 import { InboundReceivingRecord, ItemCategory, ITEM_CATEGORIES, ManualInboundRecord } from '../../types';
@@ -39,6 +41,7 @@ export const InboundSection: React.FC = () => {
   const {
     receivingRecords,
     receiveGoods,
+    confirmPendingSave,
     deleteReceivingRecord,
     manualInboundRecords,
     addManualInbound,
@@ -135,7 +138,7 @@ export const InboundSection: React.FC = () => {
   const [manualPrice, setManualPrice] = useState<number | ''>(0);
   const [manualIncludePPN, setManualIncludePPN] = useState<boolean>(false);
   const [manualPPNRate, setManualPPNRate] = useState<number>(11);
-  const [manualDate, setManualDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [manualDate, setManualDate] = useState<string>(() => jakartaDate());
   const [manualSourceType, setManualSourceType] = useState<'vendor' | 'other'>('vendor');
   const [manualVendorName, setManualVendorName] = useState<string>(() => vendors[0]?.namaVendor || '');
   const [manualOtherSource, setManualOtherSource] = useState<string>('Pembelian Langsung Pasar / Petty Cash');
@@ -204,10 +207,11 @@ export const InboundSection: React.FC = () => {
     setSelectedReceivingRecord(record);
     const initialMap: Record<string, number> = {};
     const initialPriceMap: Record<string, number> = {};
-    record.items.forEach((it) => {
-      initialMap[it.sku] = it.pendingQty; // Default to receiving remaining pending qty
+    record.items.forEach((it, index) => {
+      const lineId = receiptLineId(it, index);
+      initialMap[lineId] = it.pendingQty; // Default to receiving remaining pending qty
       const invItem = inventory.find((inv) => inv.sku === it.sku);
-      initialPriceMap[it.sku] =
+      initialPriceMap[lineId] =
         it.unitPrice !== undefined && it.unitPrice > 0
           ? it.unitPrice
           : invItem?.priceBudget ?? invItem?.price ?? 0;
@@ -218,13 +222,13 @@ export const InboundSection: React.FC = () => {
   };
 
   // Submit Receive Goods
-  const handleSubmitReceive = () => {
+  const handleSubmitReceive = async () => {
     if (!selectedReceivingRecord) return;
 
-    const payload = selectedReceivingRecord.items.map((it) => ({
-      sku: it.sku,
-      qtyReceived: receivedQtyMap[it.sku] || 0,
-      unitPrice: receivedPriceMap[it.sku] ?? it.unitPrice,
+    const payload = selectedReceivingRecord.items.map((it, index) => ({
+      lineId: receiptLineId(it, index),
+      qtyReceived: receivedQtyMap[receiptLineId(it, index)] || 0,
+      unitPrice: receivedPriceMap[receiptLineId(it, index)] ?? it.unitPrice,
     }));
 
     const poVendorId = selectedReceivingRecord.poVendorId;
@@ -232,7 +236,9 @@ export const InboundSection: React.FC = () => {
     const vendorName = selectedReceivingRecord.vendorName;
     const totalRecvQty = payload.reduce((acc, it) => acc + it.qtyReceived, 0);
 
-    receiveGoods(selectedReceivingRecord.id, payload, receiveNotes);
+    const result = receiveGoods(selectedReceivingRecord.id, payload, receiveNotes);
+    if (!result.success) { alert(result.message); return; }
+    try { await confirmPendingSave(); } catch { return; }
     setSelectedReceivingRecord(null);
 
     // Pop-up sukses
@@ -253,7 +259,7 @@ export const InboundSection: React.FC = () => {
   };
 
   // Submit Manual Incoming Goods
-  const handleManualInboundSubmit = (e: React.FormEvent) => {
+  const handleManualInboundSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const item = inventory.find((i) => i.sku === manualSku);
     if (!item) {
@@ -285,9 +291,9 @@ export const InboundSection: React.FC = () => {
     const submittedPrice = basePrice + ppnPerUnit;
     const totalPPN = ppnPerUnit * submittedQty;
     const submittedTotalPrice = submittedPrice * submittedQty;
-    const submittedDate = manualDate || new Date().toISOString().slice(0, 10);
+    const submittedDate = manualDate || jakartaDate();
 
-    addManualInbound({
+    const posted = addManualInbound({
       sku: item.sku,
       itemName: item.itemName,
       category: item.category,
@@ -305,6 +311,8 @@ export const InboundSection: React.FC = () => {
       receivedBy: currentUser.username,
       notes: manualNotes,
     });
+    if (!posted.success) { alert(posted.message); return; }
+    try { await confirmPendingSave(); } catch { return; }
 
     // Pop-up sukses
     setSuccessModalData({
@@ -342,24 +350,8 @@ export const InboundSection: React.FC = () => {
   // Handle confirm delete receiving record
   const handleConfirmDeleteReceivingRecord = () => {
     if (!recordToDelete) return;
-    const deletedId = recordToDelete.id;
-    const deletedVendor = recordToDelete.vendorName;
-    const deletedPO = recordToDelete.poVendorId;
-
-    deleteReceivingRecord(deletedId);
+    deleteReceivingRecord(recordToDelete.id);
     setRecordToDelete(null);
-
-    setSuccessModalData({
-      title: 'Form Inbound Berhasil Dihapus!',
-      message: `Dokumen receiving ${deletedId} (${deletedVendor} - PO ${deletedPO}) telah dihapus dari sistem.`,
-      details: [
-        { label: 'ID Dokumen', value: deletedId },
-        { label: 'Vendor', value: deletedVendor },
-        { label: 'Ref PO', value: deletedPO },
-        { label: 'Dihapus Oleh', value: `${currentUser.username} (${currentUser.position})` },
-      ],
-    });
-    setShowSuccessModal(true);
   };
 
   // Handle confirm delete manual inbound record
@@ -813,7 +805,7 @@ export const InboundSection: React.FC = () => {
                   <div className="flex items-center gap-1 text-[10px]">
                     <button
                       type="button"
-                      onClick={() => setManualDate(new Date().toISOString().slice(0, 10))}
+                      onClick={() => setManualDate(jakartaDate())}
                       className="px-2 py-0.5 bg-slate-100 hover:bg-emerald-50 hover:text-emerald-700 text-slate-600 rounded font-semibold cursor-pointer"
                     >
                       Hari Ini
@@ -971,8 +963,8 @@ export const InboundSection: React.FC = () => {
                   </label>
                   <div className="relative">
                     <input
-                      type="number"
-                      min="1"
+                      type="number" step="0.001"
+                      min="0.001"
                       required
                       value={manualQty}
                       onChange={(e) => {
@@ -980,7 +972,7 @@ export const InboundSection: React.FC = () => {
                         if (raw === '') {
                           setManualQty('');
                         } else {
-                          const parsed = parseInt(raw, 10);
+                          const parsed = Number(raw);
                           setManualQty(isNaN(parsed) ? '' : Math.max(0, parsed));
                         }
                       }}
@@ -1979,17 +1971,18 @@ export const InboundSection: React.FC = () => {
             </p>
 
             <div className="space-y-3 overflow-y-auto flex-1 pr-1">
-              {selectedReceivingRecord.items.map((it) => {
+              {selectedReceivingRecord.items.map((it, index) => {
+                const lineId = receiptLineId(it, index);
                 const invItem = inventory.find((inv) => inv.sku === it.sku);
                 const budgetPrice = invItem?.priceBudget ?? invItem?.price ?? it.unitPrice ?? 0;
-                const currentInputPrice = receivedPriceMap[it.sku] ?? it.unitPrice ?? budgetPrice;
+                const currentInputPrice = receivedPriceMap[lineId] ?? it.unitPrice ?? budgetPrice;
                 const diffPct = budgetPrice > 0 ? ((currentInputPrice - budgetPrice) / budgetPrice) * 100 : 0;
                 const isOverMargin = budgetPrice > 0 && diffPct > 15;
                 const isUnderMargin = budgetPrice > 0 && diffPct < -15;
 
                 return (
                   <div
-                    key={it.sku}
+                    key={lineId}
                     className={`p-3 rounded-xl border space-y-2 text-xs ${
                       isOverMargin
                         ? 'border-rose-300 bg-rose-50/40'
@@ -2022,11 +2015,12 @@ export const InboundSection: React.FC = () => {
                               type="number"
                               min="0"
                               max={it.pendingQty}
-                              value={receivedQtyMap[it.sku] ?? it.pendingQty}
+                              step="0.001"
+                              value={receivedQtyMap[lineId] ?? it.pendingQty}
                               onChange={(e) =>
                                 setReceivedQtyMap({
                                   ...receivedQtyMap,
-                                  [it.sku]: Math.max(0, parseInt(e.target.value) || 0),
+                                  [lineId]: Math.max(0, Number(e.target.value) || 0),
                                 })
                               }
                               className="w-full px-2 py-1 bg-white border border-slate-300 rounded-lg font-bold text-center text-xs focus:ring-2 focus:ring-emerald-500 outline-hidden"
@@ -2047,7 +2041,7 @@ export const InboundSection: React.FC = () => {
                             onChange={(e) =>
                               setReceivedPriceMap({
                                 ...receivedPriceMap,
-                                [it.sku]: Math.max(0, parseInt(e.target.value) || 0),
+                                [lineId]: Math.max(0, Number(e.target.value) || 0),
                               })
                             }
                             className="w-full px-2 py-1 bg-white border border-slate-300 rounded-lg font-bold text-right text-xs text-emerald-800 focus:ring-2 focus:ring-emerald-500 outline-hidden"

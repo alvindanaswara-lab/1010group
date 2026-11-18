@@ -23,8 +23,8 @@ export interface SOParseResult {
   matchedItemsCount: number;
   unmatchedItemsCount: number;
   itemsWithVariance: number;
+  missingSkus: string[];
   rows: ParsedSORow[];
-  errors: string[];
 }
 
 /**
@@ -41,7 +41,7 @@ export function downloadSOTemplate(items: InventoryItem[], periodKey: string) {
     Kategori: item.category,
     Satuan: item.unit,
     'Stok Buku Sistem': item.endingInventory,
-    'Hasil Fisik SO': item.endingInventory, // default prefilled with system stock
+    'Hasil Fisik SO': '',
     'Catatan Fisik': '',
   }));
 
@@ -106,15 +106,16 @@ export async function parseSOFile(
   }
 
   const inventoryBySku = new Map<string, InventoryItem>();
-  const inventoryByName = new Map<string, InventoryItem>();
-
+  const inventoryByName = new Map<string, InventoryItem | null>();
   currentInventory.forEach((item) => {
+    const name = item.itemName.trim().toLowerCase();
     inventoryBySku.set(item.sku.trim().toUpperCase(), item);
-    inventoryByName.set(item.itemName.trim().toLowerCase(), item);
+    inventoryByName.set(name, inventoryByName.has(name) ? null : item);
   });
 
   const parsedRows: ParsedSORow[] = [];
-  const errors: string[] = [];
+  const seen = new Set<string>();
+  const validSkus = new Set<string>();
   let validRows = 0;
   let invalidRows = 0;
   let itemsWithVariance = 0;
@@ -176,10 +177,9 @@ export async function parseSOFile(
       .trim();
 
     // Match item in current inventory
-    let matchedItem = rawSku ? inventoryBySku.get(rawSku.toUpperCase()) : undefined;
-    if (!matchedItem && rawName) {
-      matchedItem = inventoryByName.get(rawName.toLowerCase());
-    }
+    const matchedItem = rawSku
+      ? inventoryBySku.get(rawSku.toUpperCase())
+      : inventoryByName.get(rawName.toLowerCase());
 
     if (!matchedItem) {
       unmatchedItemsCount += 1;
@@ -201,32 +201,26 @@ export async function parseSOFile(
 
     matchedItemsCount += 1;
 
-    // Validate Physical Count
-    let physicalCount = 0;
-    let isCountValid = true;
-    let errorMsg = '';
-
-    if (rawCount === null || rawCount === '') {
-      // Selalu kosongkan (0) jika tidak diisi pada file upload
-      physicalCount = 0;
-    } else {
-      const parsedNum = Number(rawCount);
-      if (isNaN(parsedNum) || parsedNum < 0) {
-        isCountValid = false;
-        errorMsg = `Nilai fisik "${rawCount}" bukan angka valid.`;
-        physicalCount = 0;
-      } else {
-        physicalCount = Math.round(parsedNum);
-      }
+    const countText = String(rawCount ?? '').trim().replace(',', '.');
+    const parsedNum = Number(countText);
+    let errorMsg: string | undefined;
+    if (seen.has(matchedItem.sku)) errorMsg = 'SKU muncul lebih dari sekali.';
+    else if (!countText) errorMsg = 'Isi hasil hitung fisik. Masukkan 0 jika tidak ada stok.';
+    else if (!/^\d+(?:\.\d{1,3})?$/.test(countText) || parsedNum > 1_000_000_000) {
+      errorMsg = 'Masukkan kuantitas non-negatif dengan maksimal tiga angka desimal.';
     }
+    seen.add(matchedItem.sku);
+    const isCountValid = errorMsg === undefined;
+    const physicalCount = isCountValid ? parsedNum : 0;
 
     const gapUsage = physicalCount - matchedItem.endingInventory;
-    if (gapUsage !== 0) {
+    if (isCountValid && gapUsage !== 0) {
       itemsWithVariance += 1;
     }
 
     if (isCountValid) {
       validRows += 1;
+      validSkus.add(matchedItem.sku);
     } else {
       invalidRows += 1;
     }
@@ -253,7 +247,7 @@ export async function parseSOFile(
     matchedItemsCount,
     unmatchedItemsCount,
     itemsWithVariance,
+    missingSkus: currentInventory.filter((item) => !validSkus.has(item.sku)).map((item) => item.sku),
     rows: parsedRows,
-    errors,
   };
 }

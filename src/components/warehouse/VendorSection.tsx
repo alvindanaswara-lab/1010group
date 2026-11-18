@@ -1,5 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import { canReleasePO } from '../../utils/purchaseApproval';
+import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '../../context/AppContext';
+import { api, WarehouseError } from '../../lib/warehouseApi';
 import { Vendor, PurchaseOrder, POItem, ITEM_CATEGORIES, ItemCategory } from '../../types';
 import { formatRupiah, exportPOToExcel } from '../../utils/excelExport';
 import {
@@ -13,6 +15,8 @@ import {
   getAccessToken,
   logoutGoogle,
   sendGmailMessage,
+  GmailDeliveryError,
+  findSentVendorEmail,
   createGmailDraft,
   listGmailMessages,
   trashGmailMessage,
@@ -63,11 +67,23 @@ import {
   Lock,
   Truck,
   Paperclip,
-  ExternalLink,
   RefreshCw,
   Inbox,
   LogOut,
 } from 'lucide-react';
+
+type VendorDelivery = {
+  vendorName: string;
+  status: 'pending' | 'sending' | 'sent' | 'unknown';
+  lastError?: string;
+  attemptId?: string;
+  messageId?: string;
+};
+
+const vendorDeliveryLabels: Record<VendorDelivery['status'], string> = {
+  pending: 'Menunggu pengiriman', sending: 'Pengiriman belum dikonfirmasi',
+  sent: 'Terkirim', unknown: 'Perlu cek folder Terkirim',
+};
 
 export const VendorSection: React.FC = () => {
   const {
@@ -80,7 +96,7 @@ export const VendorSection: React.FC = () => {
     rejectPOItem,
     submitPOVendorToReceiving,
     batchReleasePOToVendor,
-    recordVendorEmailSent,
+    confirmPendingSave,
     submitPOToCostControl,
     submitPOToVendorSummary,
     batchSubmitPOToCostControl,
@@ -690,12 +706,10 @@ export const VendorSection: React.FC = () => {
 
   // State untuk Modal Kirim Email PO ke Alamat Email Vendor
   const [emailModalPO, setEmailModalPO] = useState<PurchaseOrder | null>(null);
-  const [emailTargetVendor, setEmailTargetVendor] = useState<string>('ALL');
+  const [emailTargetVendor, setEmailTargetVendor] = useState('');
   const [emailRecipient, setEmailRecipient] = useState<string>('');
-  const [emailCc, setEmailCc] = useState<string>('purchasing@1010group.com, costcontrol@1010group.com');
   const [emailSubject, setEmailSubject] = useState<string>('');
   const [emailBody, setEmailBody] = useState<string>('');
-  const [attachPDFInEmail, setAttachPDFInEmail] = useState<boolean>(true);
 
   // Helper Export PO to PDF (.pdf)
   const handleExportPDF = (po: PurchaseOrder, specificVendorName?: string) => {
@@ -706,62 +720,27 @@ export const VendorSection: React.FC = () => {
     });
   };
 
-  // Helper Populate Email Modal Fields
-  const populateEmailModalFields = (po: PurchaseOrder, vendorSelection: string) => {
-    const approvedItems = po.items.filter(
-      (it) => it.status !== 'Rejected' && it.approvalStatus !== 'Rejected'
-    );
-    const uniqueVendorNames = Array.from(
-      new Set(approvedItems.map((it) => it.vendorName || 'Vendor Umum'))
-    );
-
-    if (vendorSelection === 'ALL' && uniqueVendorNames.length > 1) {
-      const emailList = uniqueVendorNames
-        .map((vName) => vendors.find((v) => v.namaVendor === vName)?.email)
-        .filter((em): em is string => Boolean(em && em.trim() !== ''));
-
-      const firstVendorObj = vendors.find((v) => v.namaVendor === uniqueVendorNames[0]);
-      const baseContent = generateVendorPOEmailContent(
-        po,
-        uniqueVendorNames.join(', '),
-        firstVendorObj
-      );
-
-      setEmailTargetVendor('ALL');
-      setEmailRecipient(emailList.join(', ') || 'order@mitravendor.co.id');
-      setEmailSubject(
-        `[OFFICIAL PO] Release Purchase Order #${po.id} (${uniqueVendorNames.length} Mitra Vendor) - ${formatDate(po.generatedDate)}`
-      );
-      setEmailBody(baseContent.body);
-    } else {
-      const targetName =
-        vendorSelection === 'ALL' ? uniqueVendorNames[0] || 'Vendor Umum' : vendorSelection;
-      const vendorObj = vendors.find((v) => v.namaVendor === targetName);
-      const content = generateVendorPOEmailContent(po, targetName, vendorObj);
-
-      setEmailTargetVendor(targetName);
-      setEmailRecipient(content.email || 'sales@mitravendor.co.id');
-      setEmailSubject(content.subject);
-      setEmailBody(content.body);
-    }
+  const populateEmailModalFields = (po: PurchaseOrder, vendorName: string) => {
+    const vendor = vendors.find((item) => item.namaVendor === vendorName);
+    const content = generateVendorPOEmailContent(po, vendorName, vendor);
+    setEmailTargetVendor(vendorName);
+    setEmailRecipient(content.email.trim());
+    setEmailSubject(content.subject);
+    setEmailBody(content.body);
+    setGmailErrorMsg(null);
   };
 
-  // Open Email Modal
-  const handleOpenEmailModal = (po: PurchaseOrder, specificVendorName?: string) => {
-    const approvedItems = po.items.filter(
-      (it) => it.status !== 'Rejected' && it.approvalStatus !== 'Rejected'
-    );
-    const uniqueVendorNames = Array.from(
-      new Set(approvedItems.map((it) => it.vendorName || 'Vendor Umum'))
-    );
-    const initialTarget =
-      specificVendorName || (uniqueVendorNames.length === 1 ? uniqueVendorNames[0] : 'ALL');
-
+  const handleOpenEmailModal = (po: PurchaseOrder, vendorName?: string) => {
+    const available = po.items.filter((item) => item.approvalStatus === 'Approved' && item.vendorName);
+    const target = available.find((item) => item.vendorName === vendorName)?.vendorName ?? available[0]?.vendorName;
+    if (!target || (po.status !== 'Sent to Receiving' && !canReleasePO(po))) {
+      setSubmitMsg({ type: 'error', text: 'Tunggu persetujuan Finance sebelum menyiapkan email vendor.' });
+      return;
+    }
+    setVendorDeliveries([]);
     setEmailModalPO(po);
-    setAttachPDFInEmail(true);
     setConfirmGmailAction(null);
-    setGmailErrorMsg(null);
-    populateEmailModalFields(po, initialTarget);
+    populateEmailModalFields(po, target);
   };
 
   // State Integrasi Gmail (OAuth & API)
@@ -856,179 +835,134 @@ export const VendorSection: React.FC = () => {
     setSelectedGmailMessage(null);
   };
 
-  // Explicit confirmation trigger before executing mutating Gmail API call
-  const handleRequestGmailAction = (
-    type: 'send' | 'draft',
-    alsoReleaseToInbound?: boolean
-  ) => {
-    if (!emailModalPO) return;
-    if (!emailRecipient.trim()) {
-      setGmailErrorMsg('Harap isi alamat email tujuan vendor terlebih dahulu.');
-      return;
-    }
+  const [vendorDeliveries, setVendorDeliveries] = useState<VendorDelivery[]>([]);
+  const deliveryInFlight = useRef(false);
+  const selectedDelivery = vendorDeliveries.find((entry) => entry.vendorName === emailTargetVendor);
+  const modalPOId = emailModalPO?.id;
+
+  useEffect(() => {
+    if (!modalPOId) return;
+    let active = true;
+    api<VendorDelivery[]>('vendor-delivery', 'POST', { poId: modalPOId, action: 'list' })
+      .then((deliveries) => { if (active) setVendorDeliveries(deliveries); })
+      .catch((error: unknown) => { if (active) setGmailErrorMsg(error instanceof Error ? error.message : String(error)); });
+    return () => { active = false; };
+  }, [modalPOId]);
+
+  const refreshVendorDeliveries = async (poId: string) => {
+    setVendorDeliveries(await api<VendorDelivery[]>('vendor-delivery', 'POST', { poId, action: 'list' }));
+  };
+
+  const handleRequestGmailAction = (type: 'send' | 'draft', alsoReleaseToInbound = false) => {
+    if (!emailModalPO || !emailTargetVendor) return;
+    if (!emailRecipient) { setGmailErrorMsg('Isi alamat email pada master vendor.'); return; }
     setGmailErrorMsg(null);
     setConfirmGmailAction({ type, alsoReleaseToInbound });
   };
 
-  // Execute Send or Draft via Gmail API after user confirms
   const handleExecuteConfirmedGmailAction = async () => {
-    if (!emailModalPO || !confirmGmailAction) return;
-    const token = await getAccessToken();
-    if (!token) {
-      setNeedsGmailAuth(true);
-      setConfirmGmailAction(null);
-      setGmailErrorMsg('Sesi Gmail belum aktif. Silakan klik "Sign in with Google" terlebih dahulu.');
-      return;
-    }
-
+    if (!emailModalPO || !confirmGmailAction || deliveryInFlight.current) return;
+    const intent = confirmGmailAction;
+    const vendorName = emailTargetVendor;
+    const poId = emailModalPO.id;
+    const attemptId = crypto.randomUUID();
+    const delivery = { poId, vendorName, attemptId };
+    let claimed = false;
+    let submittedToGmail = false;
+    let createdDraft = false;
+    let gmailId: string | undefined;
+    deliveryInFlight.current = true;
     setIsSendingGmail(true);
     setGmailErrorMsg(null);
 
     try {
-      const po = emailModalPO;
-      const specificVendor = emailTargetVendor === 'ALL' ? undefined : emailTargetVendor;
-
-      let attachmentObj:
-        | { fileName: string; mimeType: string; base64Data: string }
-        | undefined;
-      let downloadedPdfName = '';
-
-      if (attachPDFInEmail) {
-        const pdfAttachment = getPOPDFBase64Attachment(po, vendors, specificVendor);
-        downloadedPdfName = pdfAttachment.fileName;
-        if (pdfAttachment.base64Data) {
-          attachmentObj = {
-            fileName: pdfAttachment.fileName,
-            mimeType: 'application/pdf',
-            base64Data: pdfAttachment.base64Data,
-          };
+      if (!await getAccessToken()) throw new Error('Hubungkan akun Gmail sebelum mengirim.');
+      const po = purchaseOrders.find((item) => item.id === poId);
+      if (!po) throw new Error('PO tidak ditemukan. Muat ulang data.');
+      if (po.status !== 'Sent to Receiving') {
+        if (!intent.alsoReleaseToInbound || !canReleasePO(po)) {
+          throw new Error('Rilis PO ke Inbound terlebih dahulu.');
         }
-        exportPOToPDF(po, vendors, specificVendor);
+        const release = submitPOVendorToReceiving(poId);
+        if (!release.success) throw new Error(release.message);
+        await confirmPendingSave();
+        setEmailModalPO({ ...po, status: 'Sent to Receiving' });
       }
 
-      if (confirmGmailAction.type === 'draft') {
-        const draftRes = await createGmailDraft({
-          to: emailRecipient,
-          cc: emailCc,
-          subject: emailSubject,
-          body: emailBody,
-          attachment: attachmentObj,
-        });
-        setConfirmGmailAction(null);
-        setEmailModalPO(null);
-        setSuccessModalData({
-          title: 'Draf Email PO Berhasil Disimpan di Gmail!',
-          message: `Draf email Purchase Order (${po.id}) telah berhasil disimpan ke akun Gmail Anda (${gmailUserEmail || 'Gmail'}).`,
-          details: [
-            { label: 'ID Draf Gmail', value: draftRes.id },
-            { label: 'Nomor Form PO', value: po.id },
-            { label: 'Tujuan (To)', value: emailRecipient },
-            { label: 'Subjek Email', value: emailSubject },
-            {
-              label: 'Lampiran PDF',
-              value: attachPDFInEmail ? `${downloadedPdfName} (Terlampir)` : 'Tanpa Lampiran',
-            },
-          ],
-        });
-        setShowSuccessModal(true);
-        scrollToTop();
-        return;
-      }
-
-      // Send real email via Gmail API
-      const sendRes = await sendGmailMessage({
-        to: emailRecipient,
-        cc: emailCc,
-        subject: emailSubject,
-        body: emailBody,
-        attachment: attachmentObj,
+      const claim = () => api<{ recipient: string; po: PurchaseOrder }>('vendor-delivery', 'POST', {
+        ...delivery, action: 'claim', detail: emailRecipient,
       });
-
-      const approvedItems = po.items.filter(
-        (it) => it.status !== 'Rejected' && it.approvalStatus !== 'Rejected'
-      );
-      const uniqueVendorNames = Array.from(
-        new Set(approvedItems.map((it) => it.vendorName || 'Vendor Umum'))
-      );
-
-      const entriesToRecord =
-        emailTargetVendor === 'ALL'
-          ? uniqueVendorNames.map((vName) => {
-              const vObj = vendors.find((v) => v.namaVendor === vName);
-              return {
-                vendorName: vName,
-                email: vObj?.email || emailRecipient,
-                subject: emailSubject,
-              };
-            })
-          : [
-              {
-                vendorName: emailTargetVendor,
-                email: emailRecipient,
-                subject: emailSubject,
-              },
-            ];
-
-      recordVendorEmailSent(po.id, entriesToRecord);
-
-      let releaseResultMsg = '';
-      let receivingIdsCreated: string[] = [];
-      if (confirmGmailAction.alsoReleaseToInbound && po.status === 'Approved by Cost Control') {
-        const relRes = submitPOVendorToReceiving(po.id);
-        if (relRes.success) {
-          releaseResultMsg =
-            ' Sekaligus berhasil di-Release to Vendor dan masuk ke laman Inbound (Penerimaan Barang Masuk).';
-          receivingIdsCreated = relRes.receivingIds || [];
-        }
+      const approved = await claim().catch((error: unknown) => {
+        // Retry the same reservation only. The Gmail send itself is never retried automatically.
+        if (error instanceof WarehouseError && error.status < 500) throw error;
+        return claim();
+      });
+      claimed = true;
+      const pdf = getPOPDFBase64Attachment(approved.po, vendors, vendorName);
+      if (!pdf.base64Data) throw new Error('Lampiran PDF gagal dibuat.');
+      const options = {
+        to: approved.recipient, subject: emailSubject, body: emailBody,
+        deliveryAttemptId: attemptId,
+        attachment: {
+          fileName: pdf.fileName, mimeType: 'application/pdf', base64Data: pdf.base64Data,
+        },
+      };
+      submittedToGmail = true;
+      if (intent.type === 'draft') {
+        const draft = await createGmailDraft(options);
+        createdDraft = true;
+        await api('vendor-delivery', 'POST', {
+          ...delivery, action: 'unknown', detail: 'Draf Gmail disimpan. Kirim dari Gmail, lalu periksa folder Terkirim.',
+        });
+        setSubmitMsg({ type: 'success', text: 'Draf Gmail disimpan (' + draft.id + ').' });
+      } else {
+        const result = await sendGmailMessage(options);
+        gmailId = result.id;
+        const confirm = () => api('vendor-delivery', 'POST', {
+          ...delivery, action: 'sent', messageId: gmailId, detail: emailSubject,
+        });
+        await confirm().catch(confirm);
+        setSubmitMsg({ type: 'success', text: 'Email PO ' + poId + ' dikirim ke ' + approved.recipient + '.' });
       }
-
       setConfirmGmailAction(null);
       setEmailModalPO(null);
-
-      const details: SuccessDetail[] = [
-        { label: 'Metode Pengiriman', value: `Gmail API Resmi (${gmailUserEmail || 'Google Account'})` },
-        { label: 'Gmail Message ID', value: sendRes.id },
-        { label: 'Nomor Form PO', value: po.id },
-        {
-          label: 'Mitra Vendor Tujuan',
-          value: emailTargetVendor === 'ALL' ? uniqueVendorNames.join(', ') : emailTargetVendor,
-        },
-        { label: 'Alamat Email Vendor', value: emailRecipient },
-        { label: 'Subjek Email', value: emailSubject },
-        {
-          label: 'Lampiran PDF PO',
-          value: attachPDFInEmail
-            ? `${downloadedPdfName} (Terlampir di Gmail & Diunduh)`
-            : 'Tanpa Lampiran PDF',
-        },
-      ];
-
-      if (receivingIdsCreated.length > 0) {
-        details.push({
-          label: 'Dokumen Inbound (Receiving)',
-          value: receivingIdsCreated.join(', '),
-        });
-        details.push({
-          label: 'Status Form PO',
-          value: 'Released to Vendor & Masuk ke Inbound',
-        });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (claimed && !gmailId) {
+        const knownFailure = !submittedToGmail || (!createdDraft && error instanceof GmailDeliveryError && error.retryable);
+        await api('vendor-delivery', 'POST', {
+          ...delivery, action: knownFailure ? 'failed' : 'unknown', detail: message,
+        }).catch(() => {});
       }
-
-      setSuccessModalData({
-        title: confirmGmailAction.alsoReleaseToInbound
-          ? 'Email Terkirim via Gmail & Form Masuk ke Inbound!'
-          : 'Email Purchase Order Terkirim via Gmail!',
-        message: `Dokumen Purchase Order (${po.id}) berhasil dikirim langsung melalui akun Gmail Anda ke alamat email vendor (${emailRecipient}).${releaseResultMsg}`,
-        details,
-      });
-      setShowSuccessModal(true);
-      scrollToTop();
-    } catch (err: any) {
-      if (err?.message === 'UNAUTHENTICATED') {
-        setNeedsGmailAuth(true);
-      }
-      setGmailErrorMsg(err?.message || 'Gagal mengirim email melalui Gmail API.');
+      setConfirmGmailAction(null);
+      setGmailErrorMsg(gmailId
+        ? 'Gmail menerima pesan, tetapi pencatatan belum dikonfirmasi. Periksa folder Terkirim. ID pesan: ' + gmailId
+        : message);
+      await refreshVendorDeliveries(poId).catch(() => {});
     } finally {
+      deliveryInFlight.current = false;
+      setIsSendingGmail(false);
+    }
+  };
+
+  const handleCheckSentVendorEmail = async () => {
+    if (!emailModalPO || !selectedDelivery?.attemptId || deliveryInFlight.current) return;
+    deliveryInFlight.current = true;
+    setIsSendingGmail(true);
+    setGmailErrorMsg(null);
+    const poId = emailModalPO.id;
+    try {
+      const messageId = await findSentVendorEmail(selectedDelivery.attemptId);
+      if (!messageId) throw new Error('Pesan belum ditemukan di folder Terkirim akun Gmail ini. Jangan kirim ulang sebelum hasilnya jelas.');
+      await api('vendor-delivery', 'POST', {
+        poId, vendorName: emailTargetVendor, attemptId: selectedDelivery.attemptId,
+        action: 'sent', messageId, detail: emailSubject,
+      });
+      await refreshVendorDeliveries(poId);
+    } catch (error) {
+      setGmailErrorMsg(error instanceof Error ? error.message : String(error));
+    } finally {
+      deliveryInFlight.current = false;
       setIsSendingGmail(false);
     }
   };
@@ -1096,120 +1030,10 @@ export const VendorSection: React.FC = () => {
     </button>
   );
 
-  // Handle Send Email to Vendor (Fallback / Mailto Client)
-  const handleSendVendorEmail = (options?: {
-    openMailClient?: boolean;
-    alsoReleaseToInbound?: boolean;
-  }) => {
-    if (!emailModalPO) return;
-    if (!emailRecipient.trim()) {
-      setSubmitMsg({
-        type: 'error',
-        text: 'Harap isi alamat email tujuan vendor terlebih dahulu.',
-      });
-      return;
-    }
-
-    const po = emailModalPO;
-    const approvedItems = po.items.filter(
-      (it) => it.status !== 'Rejected' && it.approvalStatus !== 'Rejected'
-    );
-    const uniqueVendorNames = Array.from(
-      new Set(approvedItems.map((it) => it.vendorName || 'Vendor Umum'))
-    );
-
-    const entriesToRecord =
-      emailTargetVendor === 'ALL'
-        ? uniqueVendorNames.map((vName) => {
-            const vObj = vendors.find((v) => v.namaVendor === vName);
-            return {
-              vendorName: vName,
-              email: vObj?.email || emailRecipient,
-              subject: emailSubject,
-            };
-          })
-        : [
-            {
-              vendorName: emailTargetVendor,
-              email: emailRecipient,
-              subject: emailSubject,
-            },
-          ];
-
-    recordVendorEmailSent(po.id, entriesToRecord);
-
-    let downloadedPdfName = '';
-    if (attachPDFInEmail) {
-      downloadedPdfName = exportPOToPDF(
-        po,
-        vendors,
-        emailTargetVendor === 'ALL' ? undefined : emailTargetVendor
-      );
-    }
-
-    if (options?.openMailClient) {
-      const mailtoUrl = `mailto:${encodeURIComponent(emailRecipient.trim())}?cc=${encodeURIComponent(
-        emailCc.trim()
-      )}&subject=${encodeURIComponent(emailSubject)}&body=${encodeURIComponent(emailBody)}`;
-      const link = document.createElement('a');
-      link.href = mailtoUrl;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-    }
-
-    let releaseResultMsg = '';
-    let receivingIdsCreated: string[] = [];
-    if (options?.alsoReleaseToInbound && po.status === 'Approved by Cost Control') {
-      const relRes = submitPOVendorToReceiving(po.id);
-      if (relRes.success) {
-        releaseResultMsg = ' Sekaligus berhasil di-Release to Vendor dan masuk ke laman Inbound (Penerimaan Barang Masuk).';
-        receivingIdsCreated = relRes.receivingIds || [];
-      }
-    }
-
-    setEmailModalPO(null);
-
-    const details: SuccessDetail[] = [
-      { label: 'Nomor Form PO', value: po.id },
-      {
-        label: 'Mitra Vendor Tujuan',
-        value: emailTargetVendor === 'ALL' ? uniqueVendorNames.join(', ') : emailTargetVendor,
-      },
-      { label: 'Alamat Email Vendor', value: emailRecipient },
-      { label: 'Subjek Email', value: emailSubject },
-      {
-        label: 'Lampiran PDF PO',
-        value: attachPDFInEmail ? `${downloadedPdfName} (Terlampir & Diunduh)` : 'Tanpa Lampiran PDF',
-      },
-    ];
-
-    if (receivingIdsCreated.length > 0) {
-      details.push({
-        label: 'Dokumen Inbound (Receiving)',
-        value: receivingIdsCreated.join(', '),
-      });
-      details.push({
-        label: 'Status Form PO',
-        value: 'Released to Vendor & Masuk ke Inbound',
-      });
-    }
-
-    setSuccessModalData({
-      title: options?.alsoReleaseToInbound
-        ? 'Email PO Terkirim & Form Masuk ke Inbound!'
-        : 'Email Purchase Order Berhasil Dikirim ke Vendor!',
-      message: `Dokumen Purchase Order (${po.id}) berhasil dikirimkan ke alamat email vendor (${emailRecipient}).${releaseResultMsg}`,
-      details,
-    });
-    setShowSuccessModal(true);
-    scrollToTop();
-  };
-
   // Trigger Release to Vendor Modal (Single or Batch)
   const handleOpenReleaseModal = (poIds: string[]) => {
     const validPOs = purchaseOrders.filter(
-      (p) => poIds.includes(p.id) && p.status === 'Approved by Cost Control'
+      (p) => poIds.includes(p.id) && canReleasePO(p)
     );
     if (validPOs.length === 0) {
       setSubmitMsg({
@@ -1222,20 +1046,20 @@ export const VendorSection: React.FC = () => {
   };
 
   // Confirm Release to Vendor & Send to Inbound Receiving
-  const handleConfirmReleaseToVendor = () => {
+  const handleConfirmReleaseToVendor = async () => {
     if (!releasingPOIds || releasingPOIds.length === 0) return;
 
     const targetPOs = purchaseOrders.filter((p) => releasingPOIds.includes(p.id));
-    if (releaseAutoDownloadPDF) {
-      targetPOs.forEach((po) => {
-        exportPOToPDF(po, vendors);
-      });
-    }
-
     const res = batchReleasePOToVendor(releasingPOIds);
-    setReleasingPOIds(null);
-
     if (res.success) {
+      try { await confirmPendingSave(); } catch { return; }
+      setReleasingPOIds(null);
+      if (releaseAutoDownloadPDF) {
+        targetPOs.forEach((po) => {
+          const supplierNames = new Set(po.items.map((item) => item.vendorName).filter(Boolean));
+          supplierNames.forEach((supplier) => exportPOToPDF(po, vendors, supplier));
+        });
+      }
       setSubmitMsg({ type: 'success', text: res.message });
 
       const allVendors = Array.from(
@@ -2230,11 +2054,11 @@ export const VendorSection: React.FC = () => {
                                                 ) : (
                                                   <div className="flex items-center justify-center">
                                                     <input
-                                                      type="number"
+                                                      type="number" step="0.001"
                                                       min="0"
                                                       value={it.qty === 0 ? '' : it.qty}
                                                       onChange={(e) => {
-                                                        const val = e.target.value === '' ? 0 : Math.max(0, parseInt(e.target.value) || 0);
+                                                        const val = e.target.value === '' ? 0 : Math.max(0, Number(e.target.value) || 0);
                                                         handleItemQtyChange(po.id, it.sku, it.place, val);
                                                       }}
                                                       placeholder="0"
@@ -3067,13 +2891,13 @@ export const VendorSection: React.FC = () => {
                                                   <td className="px-3 py-2 text-center">
                                                     {isEditing ? (
                                                       <input
-                                                        type="number"
-                                                        min={1}
+                                                        type="number" step="0.001"
+                                                        min={0.001}
                                                         value={inlineSummaryValues.qty}
                                                         onChange={(e) =>
                                                           setInlineSummaryValues((prev) => ({
                                                             ...prev,
-                                                            qty: Math.max(1, parseInt(e.target.value) || 1),
+                                                            qty: Math.max(0.001, Number(e.target.value) || 0.001),
                                                           }))
                                                         }
                                                         className="w-16 px-1.5 py-1 text-center font-extrabold text-xs bg-white border-2 border-purple-500 rounded-md shadow-2xs focus:ring-2 focus:ring-purple-400 outline-hidden"
@@ -3429,13 +3253,13 @@ export const VendorSection: React.FC = () => {
                                                 <td className="px-3 py-2 text-center">
                                                   {isEditing ? (
                                                     <input
-                                                      type="number"
-                                                      min={1}
+                                                      type="number" step="0.001"
+                                                      min={0.001}
                                                       value={inlineSummaryValues.qty}
                                                       onChange={(e) =>
                                                         setInlineSummaryValues((prev) => ({
                                                           ...prev,
-                                                          qty: Math.max(1, parseInt(e.target.value) || 1),
+                                                          qty: Math.max(0.001, Number(e.target.value) || 0.001),
                                                         }))
                                                       }
                                                       className="w-16 px-1.5 py-1 text-center font-extrabold text-xs bg-white border-2 border-emerald-500 rounded-md shadow-2xs focus:ring-2 focus:ring-emerald-400 outline-hidden"
@@ -4334,10 +4158,10 @@ export const VendorSection: React.FC = () => {
                   Jumlah (Qty dalam {editingItem.unit}):
                 </label>
                 <input
-                  type="number"
-                  min="1"
+                  type="number" step="0.001"
+                  min="0.001"
                   value={editQty}
-                  onChange={(e) => setEditQty(Math.max(1, parseInt(e.target.value) || 1))}
+                  onChange={(e) => setEditQty(Math.max(0.001, Number(e.target.value) || 0.001))}
                   className="w-full text-center py-2 border border-slate-300 rounded-lg font-bold"
                 />
               </div>
@@ -4537,11 +4361,11 @@ export const VendorSection: React.FC = () => {
                 <label className="block font-semibold text-slate-700 mb-1">Qty</label>
                 <div className="relative">
                   <input
-                    type="number"
-                    min="1"
+                    type="number" step="0.001"
+                    min="0.001"
                     required
                     value={newItemQty}
-                    onChange={(e) => setNewItemQty(Math.max(1, parseInt(e.target.value) || 1))}
+                    onChange={(e) => setNewItemQty(Math.max(0.001, Number(e.target.value) || 0.001))}
                     className="w-full px-3 py-2 border border-slate-300 rounded-lg font-bold focus:ring-2 focus:ring-indigo-500 outline-hidden"
                   />
                   {newItemUnit && (
@@ -4943,12 +4767,12 @@ export const VendorSection: React.FC = () => {
                 </label>
                 <div className="flex items-center gap-2">
                   <input
-                    type="number"
-                    min={1}
+                    type="number" step="0.001"
+                    min={0.001}
                     value={editingSummaryItem.qty}
                     onChange={(e) =>
                       setEditingSummaryItem((prev) =>
-                        prev ? { ...prev, qty: Math.max(1, parseInt(e.target.value) || 1) } : null
+                        prev ? { ...prev, qty: Math.max(0.001, Number(e.target.value) || 0.001) } : null
                       )
                     }
                     className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-extrabold text-slate-900 focus:ring-2 focus:ring-purple-500 focus:border-purple-500 outline-hidden"
@@ -5398,21 +5222,16 @@ export const VendorSection: React.FC = () => {
                       <div>
                         <strong>Penerima (To):</strong> {emailRecipient}
                       </div>
-                      {emailCc && (
-                        <div>
-                          <strong>CC:</strong> {emailCc}
-                        </div>
-                      )}
                       <div>
                         <strong>Subjek:</strong> {emailSubject}
                       </div>
                       <div>
                         <strong>Lampiran PDF:</strong>{' '}
-                        {attachPDFInEmail ? `Dokumen Resmi PO (${emailModalPO.id}.pdf)` : 'Tanpa Lampiran'}
+                        Dokumen PO {emailModalPO.id} untuk {emailTargetVendor}
                       </div>
                       {confirmGmailAction.alsoReleaseToInbound && (
                         <div className="text-emerald-700 font-bold pt-1">
-                          • Sekaligus melakukan Release to Vendor &amp; memasukkan form ke Inbound (Receiving)
+                          • Rilis PO ke Inbound disimpan sebelum email vendor ini dikirim.
                         </div>
                       )}
                     </div>
@@ -5454,13 +5273,9 @@ export const VendorSection: React.FC = () => {
                     <select
                       value={emailTargetVendor}
                       onChange={(e) => populateEmailModalFields(emailModalPO, e.target.value)}
+                      disabled={isSendingGmail || !!confirmGmailAction}
                       className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-bold text-slate-900 focus:ring-2 focus:ring-indigo-500 outline-hidden"
                     >
-                      {uniqueVendorNames.length > 1 && (
-                        <option value="ALL">
-                          Semua Vendor pada Form PO ({uniqueVendorNames.length} Vendor)
-                        </option>
-                      )}
                       {uniqueVendorNames.map((vName) => {
                         const vObj = vendors.find((v) => v.namaVendor === vName);
                         return (
@@ -5481,7 +5296,7 @@ export const VendorSection: React.FC = () => {
                       <input
                         type="text"
                         value={emailRecipient}
-                        onChange={(e) => setEmailRecipient(e.target.value)}
+                        readOnly
                         placeholder="contoh: order@vendor.co.id"
                         className="w-full pl-8 pr-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-bold text-slate-900 focus:ring-2 focus:ring-indigo-500 outline-hidden"
                       />
@@ -5489,20 +5304,20 @@ export const VendorSection: React.FC = () => {
                   </div>
                 </div>
 
-                {/* CC & Subjek Email */}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">
-                      CC Email Internal
-                    </label>
-                    <input
-                      type="text"
-                      value={emailCc}
-                      onChange={(e) => setEmailCc(e.target.value)}
-                      placeholder="purchasing@1010group.com"
-                      className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-700 focus:ring-2 focus:ring-indigo-500 outline-hidden"
-                    />
+                {selectedDelivery && (
+                  <div className="rounded-lg bg-slate-100 p-3">
+                    <strong>{vendorDeliveryLabels[selectedDelivery.status]}</strong>
+                    {selectedDelivery.lastError && <p>{selectedDelivery.lastError}</p>}
+                    {selectedDelivery.attemptId && gmailToken &&
+                      ['unknown', 'sending'].includes(selectedDelivery.status) && (
+                        <button type="button" disabled={isSendingGmail} onClick={handleCheckSentVendorEmail}
+                          className="mt-2 font-semibold text-indigo-700 underline">
+                          Periksa folder Terkirim di Gmail
+                        </button>
+                      )}
                   </div>
+                )}
+                <div>
                   <div>
                     <label className="block font-bold text-slate-700 mb-1">
                       Subjek Email Purchase Order
@@ -5510,6 +5325,7 @@ export const VendorSection: React.FC = () => {
                     <input
                       type="text"
                       value={emailSubject}
+                      readOnly={isSendingGmail || !!confirmGmailAction}
                       onChange={(e) => setEmailSubject(e.target.value)}
                       className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl text-xs font-semibold text-slate-900 focus:ring-2 focus:ring-indigo-500 outline-hidden"
                     />
@@ -5524,6 +5340,7 @@ export const VendorSection: React.FC = () => {
                   <textarea
                     rows={8}
                     value={emailBody}
+                    readOnly={isSendingGmail || !!confirmGmailAction}
                     onChange={(e) => setEmailBody(e.target.value)}
                     className="w-full p-3 bg-slate-50 border border-slate-300 rounded-xl text-xs font-mono text-slate-800 leading-relaxed focus:bg-white focus:ring-2 focus:ring-indigo-500 outline-hidden"
                   />
@@ -5531,32 +5348,17 @@ export const VendorSection: React.FC = () => {
 
                 {/* Lampiran PDF */}
                 <div className="p-3 bg-indigo-50/70 border border-indigo-200 rounded-xl flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                  <label className="flex items-center gap-2.5 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={attachPDFInEmail}
-                      onChange={(e) => setAttachPDFInEmail(e.target.checked)}
-                      className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer"
-                    />
-                    <div className="flex items-center gap-2">
-                      <Paperclip className="w-4 h-4 text-indigo-600 shrink-0" />
-                      <div>
-                        <span className="font-bold text-indigo-950 block">
-                          Lampirkan Berkas PDF Purchase Order (.pdf) pada Email Gmail &amp; Unduh
-                        </span>
-                        <span className="text-[11px] text-indigo-700">
-                          Melampirkan dokumen PDF PO resmi secara langsung pada pengiriman Gmail API
-                        </span>
-                      </div>
-                    </div>
-                  </label>
+                  <div className="flex items-center gap-2 font-bold text-indigo-950">
+                    <Paperclip className="w-4 h-4 text-indigo-600 shrink-0" />
+                    PDF PO untuk {emailTargetVendor}
+                  </div>
 
                   <button
                     type="button"
                     onClick={() =>
                       handleExportPDF(
                         emailModalPO,
-                        emailTargetVendor === 'ALL' ? undefined : emailTargetVendor
+                        emailTargetVendor
                       )
                     }
                     className="px-3 py-1.5 bg-white hover:bg-rose-50 text-rose-700 border border-rose-200 rounded-lg font-bold text-[11px] flex items-center gap-1 shrink-0 self-start sm:self-auto cursor-pointer"
@@ -5567,94 +5369,29 @@ export const VendorSection: React.FC = () => {
                 </div>
               </div>
 
-              {/* Footer */}
-              <div className="p-4 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2">
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => handleSendVendorEmail({ openMailClient: true })}
-                    className="px-3 py-2 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer"
-                    title="Buka aplikasi email default (Outlook/Mailto)"
-                  >
-                    <ExternalLink className="w-3.5 h-3.5 text-indigo-600" />
-                    <span>Buka Mailto</span>
-                  </button>
-
-                  {!needsGmailAuth && gmailToken && (
-                    <button
-                      type="button"
-                      onClick={() => handleRequestGmailAction('draft', false)}
-                      className="px-3 py-2 bg-white hover:bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer"
-                      title="Simpan sebagai Draf di akun Gmail Anda"
-                    >
-                      <Save className="w-3.5 h-3.5 text-indigo-600" />
-                      <span>Simpan Draf Gmail</span>
-                    </button>
-                  )}
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setEmailModalPO(null)}
-                    className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-200 transition cursor-pointer"
-                  >
-                    Batal
-                  </button>
-
-                  {!needsGmailAuth && gmailToken ? (
+              <div className="p-4 bg-slate-50 border-t border-slate-200 flex flex-wrap justify-end gap-2">
+                <button type="button" disabled={isSendingGmail} onClick={() => setEmailModalPO(null)}
+                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-200">
+                  Tutup
+                </button>
+                {!needsGmailAuth && gmailToken && (!selectedDelivery || selectedDelivery.status === 'pending') &&
+                  !confirmGmailAction && (emailModalPO.status === 'Sent to Receiving' ? (
                     <>
-                      <button
-                        type="button"
-                        onClick={() => handleRequestGmailAction('send', false)}
-                        className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-extrabold transition shadow-xs flex items-center gap-1.5 cursor-pointer"
-                      >
-                        <Send className="w-3.5 h-3.5" />
-                        <span>Kirim via Gmail API</span>
+                      <button type="button" onClick={() => handleRequestGmailAction('draft')}
+                        className="px-4 py-2 rounded-xl border border-indigo-200 bg-white text-xs font-semibold text-indigo-700">
+                        Simpan Draf Gmail
                       </button>
-
-                      {emailModalPO.status === 'Approved by Cost Control' && (
-                        <button
-                          type="button"
-                          onClick={() => handleRequestGmailAction('send', true)}
-                          className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-extrabold transition shadow-sm flex items-center gap-1.5 cursor-pointer"
-                          title="Kirim Email PO via Gmail API sekaligus Release form ke Inbound sebagai penerimaan barang masuk"
-                        >
-                          <Truck className="w-3.5 h-3.5" />
-                          <span>Kirim Gmail &amp; Release ke Inbound</span>
-                        </button>
-                      )}
+                      <button type="button" onClick={() => handleRequestGmailAction('send')}
+                        className="px-4 py-2 rounded-xl bg-indigo-600 text-white text-xs font-bold">
+                        Kirim via Gmail
+                      </button>
                     </>
                   ) : (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => handleSendVendorEmail({ openMailClient: false })}
-                        className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-extrabold transition shadow-xs flex items-center gap-1.5 cursor-pointer"
-                      >
-                        <Send className="w-3.5 h-3.5" />
-                        <span>Catat &amp; Kirim Email</span>
-                      </button>
-
-                      {emailModalPO.status === 'Approved by Cost Control' && (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleSendVendorEmail({
-                              openMailClient: false,
-                              alsoReleaseToInbound: true,
-                            })
-                          }
-                          className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-extrabold transition shadow-sm flex items-center gap-1.5 cursor-pointer"
-                          title="Kirim Email PO ke Vendor sekaligus Release form ke Inbound sebagai penerimaan barang masuk"
-                        >
-                          <Truck className="w-3.5 h-3.5" />
-                          <span>Kirim &amp; Release ke Inbound</span>
-                        </button>
-                      )}
-                    </>
-                  )}
-                </div>
+                    <button type="button" onClick={() => handleRequestGmailAction('send', true)}
+                      className="px-4 py-2 rounded-xl bg-emerald-600 text-white text-xs font-bold">
+                      Rilis PO &amp; Kirim ke Vendor Ini
+                    </button>
+                  ))}
               </div>
             </div>
           </div>
